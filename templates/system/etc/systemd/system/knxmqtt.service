@@ -9,12 +9,12 @@ Type=simple
 # der Config-Pfad kommt ausschliesslich ueber die Umgebungsvariable
 # KNX_MQTT_CONFIG (Default bei fehlender Variable: relatives "config.yaml",
 # das ohne WorkingDirectory/Environment hier nie gefunden wird).
-Environment=KNX_MQTT_CONFIG=/opt/loxberry/config/plugins/knxmqtt/config.yaml
-ExecStart=/opt/loxberry/bin/plugins/knxmqtt/knx-mqtt
+Environment=KNX_MQTT_CONFIG=REPLACELBPCONFIGDIR/config.yaml
+ExecStart=REPLACELBPBINDIR/knx-mqtt
 Restart=on-failure
 RestartSec=5
-StandardOutput=append:/opt/loxberry/log/plugins/knxmqtt/knxmqtt.log
-StandardError=append:/opt/loxberry/log/plugins/knxmqtt/knxmqtt.log
+StandardOutput=append:REPLACELBPLOGDIR/knxmqtt.log
+StandardError=append:REPLACELBPLOGDIR/knxmqtt.log
 User=loxberry
 Group=loxberry
 

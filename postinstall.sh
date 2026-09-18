@@ -4,7 +4,12 @@
 # knx-mqtt selbst braucht keine npm-Abhaengigkeiten, das laeuft ueber
 # postroot.sh (Download der fertigen Binary).
 
-PLUGIN_FOLDER="knxmqtt"
+# $3 (pfolder) statt hart "knxmqtt" verdrahtet - real bestaetigt als
+# Bugursache (2026-09-18): LoxBerry vergibt bei einer Namens-/Ordner-
+# Kollision (PluginDB._calculate_md5) automatisch einen anderen
+# Ordnernamen (z.B. "knxmqtt_69a"), hartcodiertes "knxmqtt" baute dann
+# komplett ins Leere. Siehe postroot.sh fuer die ausfuehrliche Erklaerung.
+PLUGIN_FOLDER="${3:-knxmqtt}"
 LBHOME="${LBHOMEDIR:-/opt/loxberry}"
 RESOLVED_PBIN="${PBIN:-${LBHOME}/bin/plugins/${PLUGIN_FOLDER}}"
 

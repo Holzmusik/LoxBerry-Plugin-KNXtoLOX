@@ -1,17 +1,31 @@
 #!/bin/bash
 # postroot.sh wird bei Installation/Update mit Root-Rechten ausgefuehrt.
-# Parameter, die LoxBerry uebergibt: $1=TempFolder $2=Version $3=Base $4=PluginName $5=... (siehe LoxBerry SDK)
+#
+# WICHTIG (2026-09-18, real-hardware-verifiziert): $BINDIR/$CFGDIR/$LOGDIR
+# waren hier bisher HART auf "/opt/loxberry/.../knxmqtt" verdrahtet, ohne
+# Bezug zum tatsaechlichen, von LoxBerry vergebenen Plugin-Ordnernamen.
+# Das brach real bei einer simplen Aenderung der Autoren-E-Mail in
+# plugin.cfg: LoxBerrys PluginDB._calculate_md5 hasht Autor+E-Mail+Name+
+# Folder - eine geaenderte E-Mail aendert diese Pruefsumme, LoxBerry
+# erkannte dadurch eine Namens-/Ordner-Kollision mit der bereits
+# installierten Version und vergab automatisch einen neuen Ordnernamen mit
+# Suffix (hier: "knxmqtt_69a" statt "knxmqtt"). Die alten hartcodierten
+# Pfade bauten daraufhin komplett ins Leere - $BINDIR/$CFGDIR/$LOGDIR
+# existierten am Ende gar nicht, die generierten systemd-Units zeigten auf
+# nicht-existente Pfade ("Failed to set up standard output: No such file
+# or directory"). Gleiches Muster/gleiche Ursachenklasse wie der bereits
+# an den Schwester-Plugins gefixte REPLACELBP*-Unit-Bug - hier aber noch
+# grundlegender, weil ueberhaupt keine dynamische Aufloesung stattfand.
+# Fix: REPLACELBP*-Platzhalter nutzen (von LoxBerrys Installer NACHWEISLICH
+# im Skripttext selbst per replaceenv()/sed vor der Ausfuehrung ersetzt -
+# das ist der TEIL des Mechanismus, der zuverlaessig funktioniert, siehe
+# Kommentare in den Schwester-Plugins), statt den Ordnernamen zu raten.
 
-# PSCRIPTFOLDER ist das Wurzelverzeichnis des entpackten Plugin-Archivs
-# (postroot.sh liegt dort direkt neben config/, templates/, bin/, ... als
-# Geschwister - KEIN ".." noetig, das war ein Bug im urspruenglichen Skript,
-# der nie auffiel weil es vorher schon am erfundenen Download-404 scheiterte).
 PSCRIPTFOLDER=$(dirname "$0")
-source "$PSCRIPTFOLDER/config/knxmqtt.env" 2>/dev/null
 
-BINDIR="/opt/loxberry/bin/plugins/knxmqtt"
-CFGDIR="/opt/loxberry/config/plugins/knxmqtt"
-LOGDIR="/opt/loxberry/log/plugins/knxmqtt"
+BINDIR="REPLACELBPBINDIR"
+CFGDIR="REPLACELBPCONFIGDIR"
+LOGDIR="REPLACELBPLOGDIR"
 SYSTEMDUNIT="/etc/systemd/system/knxmqtt.service"
 BRIDGE_SYSTEMDUNIT="/etc/systemd/system/knxlox-bridge.service"
 
@@ -52,10 +66,7 @@ systemctl disable knxd.service 2>/dev/null || true
 # selbststaendig die in go.mod per "toolchain"-Zeile geforderte neuere
 # Version nachladen kann) - deshalb hier zuerst pruefen und bei Bedarf das
 # offizielle Go-Tarball direkt von go.dev installieren, statt auf ein evtl.
-# zu altes Distributions-Go zu vertrauen. **Noch nicht auf echter Hardware
-# verifiziert** (insbesondere: ob go.dev von der LoxBerry-Box aus erreichbar
-# ist, und ob der automatische Toolchain-Download von dl.google.com dort
-# funktioniert).
+# zu altes Distributions-Go zu vertrauen.
 NEED_GO_INSTALL=1
 if command -v go &>/dev/null; then
   GO_VER="$(go version | grep -oE 'go[0-9]+\.[0-9]+' | head -1 | sed 's/go//')"
@@ -102,6 +113,29 @@ if [ ! -x "$BINDIR/knx-mqtt" ]; then
   exit 1
 fi
 
+# Von preupgrade.sh gesicherte Einstellungen wiederherstellen (siehe dort):
+# LoxBerrys eigener Installer loescht "$CFGDIR" bei JEDEM Update komplett,
+# BEVOR postroot.sh ueberhaupt laeuft (real bestaetigt, 2026-09-18: nach
+# einem Update waren config.yaml/bridge.json weg - dieses Plugin hatte
+# bislang, anders als die Schwester-Plugins, gar kein preupgrade.sh, das
+# das abgefangen haette). Bei einer echten Erstinstallation existiert kein
+# Backup (preupgrade.sh laeuft dann gar nicht erst) - dann greift wie
+# bisher die mitgelieferte Default-Config unten.
+BACKUP_DIR="/tmp/knxmqtt-preupgrade-backup"
+if [ -f "$BACKUP_DIR/config.yaml" ]; then
+  cp -a "$BACKUP_DIR/config.yaml" "$CFGDIR/config.yaml"
+  echo "config.yaml aus Preupgrade-Backup wiederhergestellt"
+fi
+if [ -f "$BACKUP_DIR/bridge.json" ]; then
+  cp -a "$BACKUP_DIR/bridge.json" "$CFGDIR/bridge.json"
+  echo "bridge.json aus Preupgrade-Backup wiederhergestellt"
+fi
+if [ -f "$BACKUP_DIR/groupaddresses.yaml" ]; then
+  cp -a "$BACKUP_DIR/groupaddresses.yaml" "$CFGDIR/groupaddresses.yaml"
+  echo "groupaddresses.yaml aus Preupgrade-Backup wiederhergestellt"
+fi
+rm -rf "$BACKUP_DIR"
+
 # Default-Config anlegen, falls noch keine existiert (wird spaeter ueber Web-UI ueberschrieben)
 if [ ! -f "$CFGDIR/config.yaml" ]; then
   cp "$PSCRIPTFOLDER/config/config.yaml.default" "$CFGDIR/config.yaml"
@@ -111,17 +145,22 @@ if [ ! -f "$CFGDIR/bridge.json" ]; then
 fi
 # postroot.sh laeuft als root - jede hier neu angelegte/kopierte Datei in
 # CFGDIR gehoert sonst root, obwohl api.cgi (laeuft als "loxberry") sie
-# spaeter beim Speichern ueberschreiben koennen muss. Deshalb hier explizit
-# zurueck auf loxberry.loxberry setzen (der Ownership-Schritt, den LoxBerrys
-# eigener Installer vorher macht, betrifft nur die zu diesem Zeitpunkt schon
-# vorhandenen Dateien - config.yaml/bridge.json entstehen erst jetzt, danach).
+# spaeter beim Speichern ueberschreiben koennen muss.
 chown -R loxberry.loxberry "$CFGDIR" 2>/dev/null || true
 
-# knx-mqtt (Go-Binary, KNX-Bus <-> MQTT) systemd-Unit installieren
-cp "$PSCRIPTFOLDER/templates/system/etc/systemd/system/knxmqtt.service" "$SYSTEMDUNIT"
+# knx-mqtt (Go-Binary, KNX-Bus <-> MQTT) systemd-Unit installieren.
+# WICHTIG: sed statt cp (siehe Kommentar oben) - die Vorlage nutzt jetzt
+# REPLACELBP*-Platzhalter statt hartcodierter Pfade.
+sed \
+  -e "s#REPLACELBPBINDIR#$BINDIR#g" \
+  -e "s#REPLACELBPCONFIGDIR#$CFGDIR#g" \
+  -e "s#REPLACELBPLOGDIR#$LOGDIR#g" \
+  "$PSCRIPTFOLDER/templates/system/etc/systemd/system/knxmqtt.service" > "$SYSTEMDUNIT"
 
 # Neue Node-Bruecke (bin/bridge.js, MQTT <-> Loxone) systemd-Unit dynamisch
-# erzeugen - gleiches Heredoc-Muster wie MiraiPanel/postroot.sh:42-61.
+# erzeugen - nutzt bereits die oben korrekt aufgeloesten $BINDIR/$LOGDIR,
+# kein eigener Platzhalter-Ersatz noetig (gleiches Heredoc-Muster wie
+# MiraiPanel/postroot.sh).
 NODE_BIN="$(command -v node)"
 if [ -z "$NODE_BIN" ]; then
   echo "WARNUNG: Node.js nicht gefunden - knxlox-bridge.service wird nicht gestartet"
@@ -160,8 +199,11 @@ fi
 # Logrotate installieren (2026-09-18: ohne das wachsen Logdateien
 # unbegrenzt - real beobachtet: bridge.log auf 4,6MB und wachsend, siehe
 # Session-Notizen zum easeemqtt/knxmqtt/miraibridge-Vorfall). Deckt sowohl
-# knxmqtt.log (Go-Binary) als auch bridge.log (Node-Bruecke) ab.
-cp "$PSCRIPTFOLDER/templates/system/etc/logrotate.d/knxmqtt" /etc/logrotate.d/knxmqtt
+# knxmqtt.log (Go-Binary) als auch bridge.log (Node-Bruecke) ab. sed statt
+# cp, aus demselben Grund wie oben bei der systemd-Unit.
+sed \
+  -e "s#REPLACELBPLOGDIR#$LOGDIR#g" \
+  "$PSCRIPTFOLDER/templates/system/etc/logrotate.d/knxmqtt" > /etc/logrotate.d/knxmqtt
 
 echo "KNX-MQTT Plugin Installation abgeschlossen."
 exit 0
