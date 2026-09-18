@@ -1,0 +1,46 @@
+# Wird von der Plugin Web-UI (api.cgi, action=config, save_settings()+
+# build_config_yaml()) komplett NEU geschrieben, sobald einmal gespeichert
+# wird — NICHT von Hand editieren, Aenderungen gehen beim naechsten Speichern
+# verloren. Diese Datei wird NIE zurueckgelesen (auch nicht von der eigenen
+# Web-UI) — reines Schreibziel fuer die Go-Engine knx-mqtt. Die eigentliche
+# Bus-Verbindungs-/knxd-Konfiguration liegt in bridge.json (siehe dort), damit
+# sie ausschliesslich ueber JSON::PP gelesen/geschrieben wird (kein
+# YAML::Tiny-Roundtrip-Risiko fuer die Web-UI-Formulare).
+#
+# WICHTIG: alle Felder unten sind das reale Config-Schema des Go-Binaries
+# pakerfeldt/knx-mqtt (verifiziert gegen dessen config.example.yaml) — diese
+# Feldnamen sind vom Binary vorgegeben, nicht frei waehlbar.
+
+loglevel: info
+
+outgoingMqttMessage:
+  # WICHTIG (auf echter Hardware entdeckt, nicht aus der Doku ableitbar):
+  # das Binary verweigert den Start mit "Outgoing MQTT message type can only
+  # be 'bytes' when no KNX addresses are imported" sobald knx.etsExport leer
+  # ist — type: json/value/value-with-unit sind NUR erlaubt, wenn ein ETS-
+  # Adressbuch importiert wurde. Da wir bewusst ohne etsExport arbeiten
+  # (eigene DPT-Decodierung in bin/dptCodec.js), MUSS es "bytes" sein.
+  # Payload ist dann direkt der rohe KNX-Bytestring (kein JSON, kein
+  # base64) — die Gruppenadresse steht stattdessen im Topic-Pfad
+  # (siehe bin/bridge.js).
+  type: bytes
+  emitUsingAddress: true
+  emitUsingName: false
+  emitValueAsString: false
+  ignoreReadCommands: false
+
+knx:
+  etsExport: ""                # bewusst leer — eigene DPT-Decodierung, siehe oben
+  endpoint: 192.168.1.50:3671  # aus bridge.json generiert, siehe api.cgi build_config_yaml()
+  tunnelMode: true              # true=Tunneling/Unicast, false=Routing/Multicast
+  ignoreUnknownGroupAddresses: false
+  enableLogs: false
+
+mqtt:
+  url: "tcp://127.0.0.1:1883"   # bei jedem Speichern aus LoxBerrys general.json neu geschrieben
+  clientId: "loxberry-knxmqtt"
+  username: ""                  # auto-synced aus LoxBerrys System-MQTT-Konfiguration
+  password: ""                  # auto-synced aus LoxBerrys System-MQTT-Konfiguration
+  topicPrefix: "knx/"
+  qos: 0
+  retain: false

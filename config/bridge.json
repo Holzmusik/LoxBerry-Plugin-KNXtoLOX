@@ -1,0 +1,26 @@
+{
+  "loxone": { "msno": 1 },
+  "log_level": "info",
+  "bus_mode": "gira",
+  "gira_gateway": "192.168.1.50",
+  "gira_port": 3671,
+  "gira_tunnel": true,
+  "topic_prefix": "knx/",
+  "client_id": "loxberry-knxmqtt",
+  "time_addr": "",
+  "date_addr": "",
+  "knxd": {
+    "device": "/dev/ttyAMA0",
+    "own_addr": "0.0.1",
+    "pool_start": "0.0.2",
+    "pool_size": 10,
+    "cache": true,
+    "loglevel": "error",
+    "send_delay": 0,
+    "extra_ip_enabled": false,
+    "extra_ip": "",
+    "ets_access_enabled": false,
+    "ets_port": 6720,
+    "local_ip_port": 3671
+  }
+}

@@ -1,0 +1,357 @@
+'use strict';
+
+const fs   = require('fs');
+const path = require('path');
+const yaml = require('js-yaml');
+const mqtt = require('mqtt');
+const dptCodec = require('./dptCodec');
+const loxberrylog = require('./loxberrylog');
+
+// ── Pfade: LoxBerry vs. lokale Entwicklung ─────────────────
+// Gleiches Muster wie MiraiPanel/bin/bridge.js: auf LoxBerry liegen bin/ und
+// config/ in getrennten Systemverzeichnissen, im Entwicklungs-Checkout sind
+// sie Geschwister-Ordner neben bin/.
+const LBHOMEDIR = process.env.LBHOMEDIR || '';
+const PLUGIN_FOLDER = path.basename(__dirname); // 'knxmqtt' auf LoxBerry, 'bin' lokal (dort ungenutzt)
+
+// Macht LoxBerrys "Log-Level"-Schalter (Plugin-Verwaltung) fuer die
+// hochfrequenten Zeilen ([knx]/[cmd]/[latenz], je Telegramm/Befehl EINE
+// Zeile) nutzbar - real bestaetigt als Hauptursache fuer unkontrolliertes
+// Wachstum von bridge.log (2026-09-18). Siehe bin/loxberrylog.js.
+const logLevel = loxberrylog.create(PLUGIN_FOLDER, LBHOMEDIR);
+const CFG_DIR = LBHOMEDIR
+  ? path.join(LBHOMEDIR, 'config', 'plugins', PLUGIN_FOLDER)
+  : path.join(__dirname, '..', 'config');
+const DATA_DIR = LBHOMEDIR
+  ? path.join(LBHOMEDIR, 'data', 'plugins', PLUGIN_FOLDER)
+  : path.join(__dirname, '..', 'data');
+
+const PATHS = {
+  bridgeCfg: path.join(CFG_DIR, 'bridge.json'),
+  knxCfg:    path.join(CFG_DIR, 'config.yaml'),
+  gaFile:    path.join(CFG_DIR, 'groupaddresses.yaml'),
+  // /dev/shm statt data/-Verzeichnis: /dev/shm ist unter Linux ein
+  // RAM-Dateisystem (tmpfs), auf praktisch jedem System vorhanden -
+  // Schreibvorgaenge landen nie auf der SD-Karte/eMMC, unabhaengig davon,
+  // welches Speichermedium hinter LoxBerrys eigenen config/data/log-
+  // Verzeichnissen steckt (das ist plattform-/installationsabhaengig und
+  // nicht garantiert). Damit kein Ereignis-Puffer/Drossel mehr noetig -
+  // RAM-Schreibvorgaenge sind praktisch kostenlos, jedes Ereignis schreibt
+  // direkt.
+  activity: '/dev/shm/knxmqtt-activity.json',
+};
+
+// Live-Aktivitaet fuer die Status-Seite: Ringpuffer der letzten Ereignisse
+// (beide Richtungen), als Datei geschrieben, da api.cgi (Perl-Prozess) nicht
+// direkt auf den In-Memory-Zustand dieses Node-Prozesses zugreifen kann.
+const ACTIVITY_MAX = 50;
+let activity = [];
+// addr -> label, befuellt in main() aus groupaddresses.yaml - erlaubt
+// recordActivity() den Anzeigenamen mitzuloggen, ohne dass jeder Aufrufer
+// selbst durch gaRows suchen muss.
+let addrLabels = new Map();
+
+// "YYYY-MM-DD HH:MM:SS" in LOKALER Zeit (nicht toISOString() - das ist immer
+// UTC). Frueher wurde toISOString() verwendet, wodurch die "Zeit"-Spalte der
+// Live-Aktivitaet 2h hinter der tatsaechlichen (Sommerzeit-)Ortszeit lag -
+// besonders sichtbar bei den Zeitgeber-Eintraegen, deren WERT-Spalte schon
+// korrekt lokale Zeit zeigt (toLocaleTimeString() in publishSystemTime()) -
+// beide Spalten zeigten dieselbe Sekunde, aber mit 2h Differenz.
+function pad2(n) { return String(n).padStart(2, '0'); }
+function localTimestamp() {
+  const d = new Date();
+  return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' +
+    pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+}
+
+function recordActivity(direction, addr, dpt, value, labelOverride) {
+  const label = labelOverride || addrLabels.get(addr) || '';
+  activity.unshift({ ts: localTimestamp(), direction, addr, label, dpt, value: String(value) });
+  if (activity.length > ACTIVITY_MAX) activity.length = ACTIVITY_MAX;
+  try {
+    fs.writeFileSync(PATHS.activity, JSON.stringify(activity));
+  } catch (e) {
+    console.warn('[activity] Konnte activity.json nicht schreiben:', e.message);
+  }
+}
+
+function loadJson(file) {
+  return JSON.parse(fs.readFileSync(file, 'utf8'));
+}
+
+function loadYaml(file) {
+  return yaml.load(fs.readFileSync(file, 'utf8')) || {};
+}
+
+// groupaddresses.yaml existiert auf einer frischen Installation noch NICHT -
+// sie wird erst beim ersten Speichern der Tabelle über die Web-UI angelegt
+// (siehe api.cgi save_ga_rows()). Das ist der Normalfall direkt nach der
+// Installation, kein Fehler - "keine Gruppenadresse konfiguriert" statt
+// process.exit(1), sonst startet die Bridge nach jeder frischen Installation
+// nie (bis der Nutzer einmal die - dann noch leere - Tabelle speichert).
+function loadYamlOptional(file) {
+  try {
+    return yaml.load(fs.readFileSync(file, 'utf8')) || {};
+  } catch (e) {
+    if (e.code === 'ENOENT') return {};
+    throw e;
+  }
+}
+
+let cfg, knxCfg, gaRows;
+try {
+  cfg    = loadJson(PATHS.bridgeCfg);
+  knxCfg = loadYamlOptional(PATHS.knxCfg);
+  gaRows = (loadYamlOptional(PATHS.gaFile).groupaddresses) || [];
+} catch (e) {
+  console.error('[config] Fehler beim Laden der Konfiguration:', e.message);
+  process.exit(1);
+}
+
+// ── Miniserver- und MQTT-Zugangsdaten aus der LoxBerry-Systemkonfiguration ──
+// Identisches Prinzip wie MiraiPanel: das Plugin speichert nur die
+// Miniserver-Nummer (bridge.json → loxone.msno); Host/User/Pass für
+// Miniserver UND MQTT-Broker stammen aus general.json, damit sie nicht
+// doppelt gepflegt werden müssen. Die Go-Engine (knx-mqtt) bekommt ihre
+// eigene Sicht auf denselben Broker separat über config.yaml (dort von
+// api.cgi bei jedem Speichern aus general.json synchronisiert) — der
+// Node-Bridge hier liest die Broker-Zugangsdaten NICHT aus config.yaml,
+// nur topicPrefix/qos (siehe main()).
+function readGeneralJson() {
+  const home = process.env.LBHOMEDIR || '/opt/loxberry';
+  const generalPath = path.join(home, 'config', 'system', 'general.json');
+  return JSON.parse(fs.readFileSync(generalPath, 'utf8'));
+}
+
+function loadMiniserverConn(msno) {
+  if (!msno) throw new Error('Keine Miniserver-Nummer (loxone.msno) in bridge.json konfiguriert');
+  const general = readGeneralJson();
+  const msSection = general.Miniserver || general.Miniservers;
+  const ms = msSection && (msSection[msno] || msSection[String(msno)]);
+  if (!ms) throw new Error(`Miniserver #${msno} nicht in LoxBerry general.json gefunden`);
+  const host = ms.Ipaddress || ms.IPAddress;
+  if (!host) throw new Error(`Miniserver #${msno}: IP-Adresse nicht gefunden`);
+  return {
+    host,
+    port: ms.Port || 80,
+    user: ms.Admin_raw || ms.Admin || '',
+    pass: ms.Pass_raw || ms.Pass || '',
+  };
+}
+
+function loadMqttConn() {
+  const general = readGeneralJson();
+  const m = general.Mqtt;
+  if (!m || !m.Brokerhost) throw new Error('MQTT Gateway ist in LoxBerry nicht konfiguriert (general.json → Mqtt.Brokerhost)');
+  return {
+    host: m.Brokerhost,
+    port: parseInt(m.Brokerport, 10) || 1883,
+    user: m.Brokeruser || undefined,
+    pass: m.Brokerpass || undefined,
+  };
+}
+
+// ── Gruppenadressen-Tabelle → zwei Allowlist-Maps ──────────
+// Entspricht MiraiPanels buildStateFilter()-Prinzip: nur was hier explizit
+// konfiguriert ist, wird überhaupt verarbeitet/weitergeleitet.
+//   inputMap:  KNX-Gruppenadresse -> {uuid, dpt}   (KNX-Zustand -> Loxone schreiben)
+//   outputMap: Loxone-State-UUID  -> {addr, dpt}   (Loxone-Zustand -> KNX-Bus schreiben)
+function buildMaps(rows) {
+  const inputMap = new Map();
+  const outputMap = new Map();
+  for (const row of rows) {
+    if (!row || !row.addr) continue;
+    if (row.lox_input_uuid) {
+      inputMap.set(row.addr, { uuid: row.lox_input_uuid.toLowerCase(), dpt: row.dpt });
+    }
+    if (row.lox_output_uuid) {
+      outputMap.set(row.lox_output_uuid.toLowerCase(), { addr: row.addr, dpt: row.dpt });
+    }
+  }
+  return { inputMap, outputMap };
+}
+
+function joinTopic(prefix, addr) {
+  const p = prefix.endsWith('/') ? prefix : prefix + '/';
+  return p + addr;
+}
+
+async function main() {
+  console.log('[bridge] KNXtoLOX Node-Bridge (MQTT<->Loxone) startet');
+  console.log('[bridge] CFG_DIR:', CFG_DIR);
+
+  const loxConn  = loadMiniserverConn(cfg.loxone && cfg.loxone.msno);
+  const mqttConn = loadMqttConn();
+  console.log(`[bridge] Miniserver: ${loxConn.host}:${loxConn.port}`);
+  console.log(`[bridge] MQTT-Broker: ${mqttConn.host}:${mqttConn.port}`);
+
+  const topicPrefix = (knxCfg.mqtt && knxCfg.mqtt.topicPrefix) || 'knx/';
+  const { inputMap, outputMap } = buildMaps(gaRows);
+  for (const row of gaRows) {
+    if (row && row.addr && row.label) addrLabels.set(row.addr, row.label);
+  }
+  console.log(`[bridge] ${inputMap.size} Gruppenadresse(n) -> Loxone (Eingang), ${outputMap.size} Loxone-Zustand(e) -> KNX (Ausgang)`);
+  if (inputMap.size === 0 && outputMap.size === 0) {
+    console.warn('[bridge] Keine Gruppenadresse ist einem Loxone-Ziel zugeordnet — bitte in der Gruppenadressen-Tabelle konfigurieren');
+  }
+
+  // ── MQTT Client ────────────────────────────────────────────
+  const mqttClient = mqtt.connect({
+    host: mqttConn.host,
+    port: mqttConn.port,
+    username: mqttConn.user,
+    password: mqttConn.pass,
+    clientId: 'knxlox-bridge',
+    clean: true,
+    reconnectPeriod: 5000,
+  });
+
+  // Gezieltes Abo nur der konfigurierten Gruppenadressen (kein Wildcard+lokaler
+  // Filter wie bei MiraiPanel) — der Broker liefert dann gar keinen
+  // irrelevanten GA-Traffic an diesen Prozess, das entspricht dem Wunsch nach
+  // "möglichst effizient, nur relevante Daten". topicToAddr bildet das
+  // abonnierte Topic zurück auf die Gruppenadresse ab (siehe Kommentar beim
+  // message-Handler, wieso das noetig ist).
+  const topicToAddr = new Map();
+  for (const addr of inputMap.keys()) topicToAddr.set(joinTopic(topicPrefix, addr), addr);
+  const inputTopics = [...topicToAddr.keys()];
+
+  mqttClient.on('connect', () => {
+    console.log('[mqtt] Verbunden mit Broker');
+    if (inputTopics.length === 0) return;
+    mqttClient.subscribe(inputTopics, { qos: (knxCfg.mqtt && knxCfg.mqtt.qos) || 0 }, (err) => {
+      if (err) console.error('[mqtt] Abo fehlgeschlagen:', err.message);
+      else console.log(`[mqtt] ${inputTopics.length} Gruppenadresse(n) abonniert`);
+    });
+  });
+
+  // KNX-Zustand -> Loxone. Payload-Format: config.yaml erzwingt
+  // outgoingMqttMessage.type=bytes (das Binary verweigert den Start mit
+  // type=json/value/..., solange kein ETS-Adressbuch importiert ist — siehe
+  // Kommentar in config.yaml.default). Bei type=bytes ist der Payload DIREKT
+  // der rohe KNX-Bytestring (kein JSON, kein base64), die Gruppenadresse
+  // steckt stattdessen im Topic-Pfad, deshalb hier ueber topicToAddr statt
+  // ueber ein JSON-Feld aufgeloest.
+  mqttClient.on('message', (topic, message) => {
+    const addr = topicToAddr.get(topic);
+    const target = addr && inputMap.get(addr);
+    if (!target) { console.warn(`[knx] Keine Zuordnung fuer Topic "${topic}", ignoriert`); return; }
+
+    const value = dptCodec.decode(target.dpt, message);
+    recordActivity('knx->lox', addr, target.dpt, value);
+    sendToLoxone(target.uuid, value);
+  });
+
+  // ── Loxone via node-lox-ws-api (identisch zu MiraiPanel) ───
+  const LoxoneAPI = require('node-lox-ws-api');
+  const loxApi = new LoxoneAPI(
+    `${loxConn.host}:${loxConn.port || 80}`,
+    loxConn.user,
+    loxConn.pass,
+    true,        // auto-reconnect
+    'Token-Enc', // RSA+AES-verschlüsselte Token-Auth (Firmware 9.x+)
+    30000
+  );
+
+  let loxAuthorized = false;
+  loxApi.on('authorized',       () => { loxAuthorized = true; console.log('[lox] Authentifiziert ✓'); });
+  loxApi.on('auth_failed',      () => { loxAuthorized = false; console.error('[lox] Authentifizierung fehlgeschlagen'); });
+  loxApi.on('connect_failed',   () => { loxAuthorized = false; console.error('[lox] Verbindung fehlgeschlagen'); });
+  loxApi.on('connection_error', (e) => console.error('[lox] Fehler:', e && e.message || e));
+  loxApi.on('close',            () => { loxAuthorized = false; console.warn('[lox] Verbindung getrennt'); });
+  loxApi.on('reconnect',        () => console.log('[lox] Reconnect…'));
+
+  const pendingCommands = new Map();
+  const LOX_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{16}$/i;
+
+  function sendToLoxone(uuid, value) {
+    const key = uuid.toLowerCase();
+    if (!LOX_UUID_RE.test(key)) {
+      console.warn(`[cmd] Ziel sieht nicht wie eine echte Loxone-UUID aus, übersprungen: "${key}" = ${value}`);
+      return;
+    }
+    if (!loxAuthorized) {
+      console.warn(`[cmd] Noch nicht bei Loxone authentifiziert — Befehl trotzdem versucht: ${key} = ${value}`);
+    }
+    if (typeof loxApi.is_connected === 'function' && !loxApi.is_connected()) {
+      console.error(`[cmd] Keine Loxone-Verbindung — Befehl verworfen: ${key} = ${value}`);
+      return;
+    }
+    if (logLevel.enabled(logLevel.DEBUG)) console.log(`[cmd] jdev/sps/io/${key}/${value}`);
+    try {
+      pendingCommands.set(key, Date.now());
+      loxApi.send_command(`jdev/sps/io/${key}/${value}`);
+    } catch (e) {
+      pendingCommands.delete(key);
+      console.error(`[cmd] send_command fehlgeschlagen für ${key}:`, e && e.message || e);
+    }
+  }
+
+  // Loxone-Zustand -> KNX-Bus. NICHT retained (Schreibbefehl, kein
+  // persistenter Zustand — anders als MiraiPanels publishState()).
+  // "/write-bytes" (nicht "/write", das laut knx-mqtt-Doku einen
+  // string-formatierten Wert statt Rohbytes erwartet) mit dem rohen
+  // KNX-Byte-Buffer direkt als Payload — konsistent mit
+  // outgoingMqttMessage.type=bytes auf der Lese-Seite (siehe config.yaml.default).
+  function publishToKnx(addr, dpt, value) {
+    if (!mqttClient.connected) { console.error(`[knx] Keine MQTT-Verbindung — Schreibbefehl für ${addr} verworfen`); return; }
+    const buf = dptCodec.encode(dpt, value);
+    const topic = joinTopic(topicPrefix, addr) + '/write-bytes';
+    mqttClient.publish(topic, buf, { qos: (knxCfg.mqtt && knxCfg.mqtt.qos) || 0, retain: false });
+    if (logLevel.enabled(logLevel.DEBUG)) console.log(`[knx] ${topic} <- ${value} (dpt ${dpt})`);
+    recordActivity('lox->knx', addr, dpt, value);
+  }
+
+  function handleLoxUpdate(uuid, value) {
+    const key = uuid.toLowerCase();
+    const sentAt = pendingCommands.get(key);
+    if (sentAt !== undefined) {
+      pendingCommands.delete(key);
+      if (logLevel.enabled(logLevel.DEBUG)) console.log(`[latenz] ${key}: ${Date.now() - sentAt}ms (MQTT-Befehl -> Loxone-Rückmeldung)`);
+    }
+    const target = outputMap.get(key);
+    if (!target) return;
+    publishToKnx(target.addr, target.dpt, value);
+  }
+
+  loxApi.on('update_event_value', (uuid, value) => handleLoxUpdate(uuid, value));
+  loxApi.on('update_event_text',  (uuid, text)  => handleLoxUpdate(uuid, text));
+
+  // ── KNX-Zeitgeber: periodischer Systemzeit-Push (DPT 10.001/11.001) ──────
+  // Oeffentlicher KNX-Standard (nicht projektspezifisch geraten), siehe
+  // dptCodec.encodeTimeOfDay()/encodeDate(). Leere Adresse(n) = deaktiviert,
+  // kein Timer gestartet. Ziel: KNX-Uhren/Displays am Bus zeigen die
+  // LoxBerry-Systemzeit an.
+  const timeAddr = (cfg.time_addr || '').trim();
+  const dateAddr = (cfg.date_addr || '').trim();
+  if (timeAddr || dateAddr) {
+    function publishSystemTime() {
+      if (!mqttClient.connected) return;
+      const now = new Date();
+      if (timeAddr) {
+        mqttClient.publish(joinTopic(topicPrefix, timeAddr) + '/write-bytes', dptCodec.encodeTimeOfDay(now), { qos: 0, retain: false });
+        recordActivity('zeitgeber', timeAddr, '10.001', now.toLocaleTimeString('de-DE'), 'Systemzeit');
+      }
+      if (dateAddr) {
+        mqttClient.publish(joinTopic(topicPrefix, dateAddr) + '/write-bytes', dptCodec.encodeDate(now), { qos: 0, retain: false });
+        recordActivity('zeitgeber', dateAddr, '11.001', now.toLocaleDateString('de-DE'), 'Systemdatum');
+      }
+    }
+    // Einmal sofort, danach synchron zur vollen Minute (Sekunde 0), damit
+    // KNX-Geraete am Bus sich an LoxBerrys tatsaechlicher Sekunde orientieren.
+    publishSystemTime();
+    setTimeout(() => {
+      publishSystemTime();
+      setInterval(publishSystemTime, 60000);
+    }, (60 - new Date().getSeconds()) * 1000);
+    console.log(`[zeitgeber] aktiv (Uhrzeit=${timeAddr || '-'}, Datum=${dateAddr || '-'})`);
+  }
+
+  console.log(`[lox] Verbinde mit ${loxConn.host}:${loxConn.port || 80}…`);
+  loxApi.connect();
+}
+
+main().catch(e => {
+  console.error('[bridge] Fataler Fehler:', e);
+  process.exit(1);
+});

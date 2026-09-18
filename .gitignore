@@ -1,0 +1,10 @@
+# Build-Artefakte - nie einchecken (GitHub generiert ohnehin automatisch
+# ein Tag-Archiv-Zip fuer release.cfg's ARCHIVEURL, siehe README).
+*.zip
+
+# Node: node_modules wird bei jeder Installation frisch von postinstall.sh
+# via "npm install" erzeugt, nicht eingecheckt.
+node_modules/
+
+# Go: knx-mqtt wird bei jeder Installation frisch aus dem Quellcode gebaut
+# (git clone + go build in postroot.sh) - kein Binary im Repo.

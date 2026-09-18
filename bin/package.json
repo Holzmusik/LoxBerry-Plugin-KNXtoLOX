@@ -1,0 +1,18 @@
+{
+  "name": "knxlox-bridge",
+  "version": "0.1.0",
+  "description": "MQTT <-> Loxone Bruecke fuer KNXtoLOX (KNX-Bus-Seite uebernimmt das Go-Binary knx-mqtt)",
+  "main": "bridge.js",
+  "scripts": {
+    "start": "node bridge.js"
+  },
+  "dependencies": {
+    "mqtt": "^5.3.4",
+    "node-lox-ws-api": "alladdin/node-lox-ws-api",
+    "ws": "^8.16.0",
+    "js-yaml": "^4.1.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

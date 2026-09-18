@@ -1,0 +1,22 @@
+[Unit]
+Description=KNX-MQTT Bridge (LoxBerry Plugin)
+After=network-online.target mosquitto.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# knx-mqtt kennt KEINE Kommandozeilen-Flags (verifiziert gegen cmd/main.go) -
+# der Config-Pfad kommt ausschliesslich ueber die Umgebungsvariable
+# KNX_MQTT_CONFIG (Default bei fehlender Variable: relatives "config.yaml",
+# das ohne WorkingDirectory/Environment hier nie gefunden wird).
+Environment=KNX_MQTT_CONFIG=/opt/loxberry/config/plugins/knxmqtt/config.yaml
+ExecStart=/opt/loxberry/bin/plugins/knxmqtt/knx-mqtt
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/opt/loxberry/log/plugins/knxmqtt/knxmqtt.log
+StandardError=append:/opt/loxberry/log/plugins/knxmqtt/knxmqtt.log
+User=loxberry
+Group=loxberry
+
+[Install]
+WantedBy=multi-user.target
