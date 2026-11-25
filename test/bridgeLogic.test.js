@@ -61,3 +61,14 @@ test('Punkt 1: Snapshot ueberlebt Bridge-Neustart', () => {
   assert.equal(f2.shouldSend('b', 6, false), true, 'geaendert waehrend Bridge aus war');
   assert.equal(f2.shouldSend('c', 1, false), false, 'unbekannt: nur merken');
 });
+
+test('Punkt 7: Echo-Unterdrueckung', () => {
+  const g = new L.EchoGuard(1000);
+  const b = (h) => Buffer.from(h, 'hex');
+  g.noteBusValue('1/2/3', b('80'), 10000);
+  assert.equal(g.isEcho('1/2/3', b('80'), 10500), true, 'gleiche Bytes innerhalb 1 s');
+  assert.equal(g.isEcho('1/2/3', b('81'), 10500), false, 'anderer Wert');
+  assert.equal(g.isEcho('1/2/4', b('80'), 10500), false, 'andere GA');
+  assert.equal(g.isEcho('1/2/3', b('80'), 11000), false, 'Fenster abgelaufen');
+  assert.equal(new L.EchoGuard(0).isEcho('1/2/3', b('80'), 10000), false, '0 = aus');
+});

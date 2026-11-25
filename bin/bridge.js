@@ -5,7 +5,7 @@ const path = require('path');
 const yaml = require('js-yaml');
 const mqtt = require('mqtt');
 const dptCodec = require('./dptCodec');
-const { toBool, LoxChangeFilter } = require('./bridgeLogic');
+const { toBool, LoxChangeFilter, EchoGuard } = require('./bridgeLogic');
 const loxberrylog = require('./loxberrylog');
 
 // ── Pfade: LoxBerry vs. lokale Entwicklung ─────────────────
@@ -222,6 +222,10 @@ async function main() {
   // "möglichst effizient, nur relevante Daten". topicToAddr bildet das
   // abonnierte Topic zurück auf die Gruppenadresse ab (siehe Kommentar beim
   // message-Handler, wieso das noetig ist).
+  // Punkt 7: Wert, der gerade vom Bus kam, nicht sofort zurueckschreiben.
+  // bridge.json echo_window_ms (Standard 1000, 0 = aus).
+  const echoGuard = new EchoGuard(Number.isFinite(Number(cfg.echo_window_ms)) ? Number(cfg.echo_window_ms) : 1000);
+
   const topicToAddr = new Map();
   for (const addr of inputMap.keys()) topicToAddr.set(joinTopic(topicPrefix, addr), addr);
   const inputTopics = [...topicToAddr.keys()];
@@ -257,6 +261,7 @@ async function main() {
       if (logLevel.enabled(logLevel.DEBUG)) console.log(`[knx] ${addr}: leerer Payload (Leseanfrage), ignoriert`);
       return;
     }
+    echoGuard.noteBusValue(addr, message);
     const value = dptCodec.decode(target.dpt, message);
     if (value === null || value === undefined || (typeof value === 'number' && !Number.isFinite(value))) {
       console.warn(`[knx] ${addr}: Payload ${message.toString('hex')} nicht als DPT ${target.dpt} dekodierbar, ignoriert`);
@@ -348,6 +353,10 @@ async function main() {
     const buf = dptCodec.encode(dpt, value);
     if (buf === null) {
       console.warn(`[knx] ${addr}: Wert "${value}" ist kein gueltiger DPT-${dpt}-Wert, nicht gesendet`);
+      return;
+    }
+    if (echoGuard.isEcho(addr, buf)) {
+      if (logLevel.enabled(logLevel.DEBUG)) console.log(`[knx] ${addr} <- ${value}: Echo des gerade empfangenen Bus-Werts, nicht gesendet`);
       return;
     }
     const topic = joinTopic(topicPrefix, addr) + '/write-bytes';

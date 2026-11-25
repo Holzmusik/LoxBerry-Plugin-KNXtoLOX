@@ -68,4 +68,27 @@ class LoxChangeFilter {
   }
 }
 
-module.exports = { toBool, toInterval, sameValue, LoxChangeFilter };
+// ── Punkt 7: Echo-Unterdrueckung ────────────────────────────────────────────
+// Ist eine GA in beiden Richtungen konfiguriert, aendert ein Wert vom Bus
+// den Loxone-Zustand, Loxone meldet die Aenderung zurueck, und die Bridge
+// wuerde denselben Wert sofort wieder auf den Bus schreiben. Verglichen wird
+// auf Byte-Ebene (nicht der dekodierte Wert), damit Rundungen wie bei 5.001
+// (Bus 0x80 -> 50 % -> 0x80) das Echo nicht verdecken.
+class EchoGuard {
+  constructor(windowMs) {
+    this.windowMs = windowMs;
+    this.bus = new Map(); // addr -> { hex, ts }
+  }
+
+  noteBusValue(addr, buf, now = Date.now()) {
+    this.bus.set(addr, { hex: buf.toString('hex'), ts: now });
+  }
+
+  isEcho(addr, buf, now = Date.now()) {
+    if (!(this.windowMs > 0)) return false;
+    const e = this.bus.get(addr);
+    return !!e && e.hex === buf.toString('hex') && now - e.ts < this.windowMs;
+  }
+}
+
+module.exports = { toBool, toInterval, sameValue, LoxChangeFilter, EchoGuard };
