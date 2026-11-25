@@ -101,9 +101,19 @@ echo "Go-Version: $(go version)"
 
 apt-get install -y git
 
+# Fester Commit statt "main": die Bridge haengt vom genauen MQTT-Verhalten
+# von knx-mqtt ab (Topic-Format, wie Read-Telegramme veroeffentlicht werden -
+# dort weicht der Code vom README ab). Ein ungetesteter Upstream-Stand darf
+# nicht unbemerkt bei einer Neuinstallation landen. Zum Aktualisieren: neuen
+# Commit gegen bin/bridge.js pruefen und hier eintragen.
+KNXMQTT_REPO="https://github.com/pakerfeldt/knx-mqtt.git"
+KNXMQTT_COMMIT="e2e9c388ef91e5c778b72bd8752e2e1eeff350df"
+
 GOBUILD_DIR="$(mktemp -d)"
-echo "Baue knx-mqtt aus dem Quellcode in $GOBUILD_DIR ..."
-git clone --depth 1 https://github.com/pakerfeldt/knx-mqtt.git "$GOBUILD_DIR" \
+echo "Baue knx-mqtt ($KNXMQTT_COMMIT) aus dem Quellcode in $GOBUILD_DIR ..."
+git -C "$GOBUILD_DIR" init -q \
+  && git -C "$GOBUILD_DIR" fetch -q --depth 1 "$KNXMQTT_REPO" "$KNXMQTT_COMMIT" \
+  && git -C "$GOBUILD_DIR" checkout -q FETCH_HEAD \
   && (cd "$GOBUILD_DIR" && go build -o "$BINDIR/knx-mqtt" ./cmd)
 rm -rf "$GOBUILD_DIR"
 chmod +x "$BINDIR/knx-mqtt" 2>/dev/null
@@ -135,6 +145,14 @@ if [ -f "$BACKUP_DIR/groupaddresses.yaml" ]; then
   echo "groupaddresses.yaml aus Preupgrade-Backup wiederhergestellt"
 fi
 rm -rf "$BACKUP_DIR"
+
+# Migration v0.3.0: bestehende config.yaml (vom Backup wiederhergestellt,
+# nur beim Speichern in der Web-UI neu erzeugt) auf ignoreReadCommands: true
+# umstellen - sonst kommen Bus-Leseanfragen bis zum naechsten Speichern
+# weiter als leere Werte bei der Bridge an.
+if [ -f "$CFGDIR/config.yaml" ]; then
+  sed -i 's/^\([[:space:]]*ignoreReadCommands:[[:space:]]*\)false/\1true/' "$CFGDIR/config.yaml"
+fi
 
 # Default-Config anlegen, falls noch keine existiert (wird spaeter ueber Web-UI ueberschrieben)
 if [ ! -f "$CFGDIR/config.yaml" ]; then

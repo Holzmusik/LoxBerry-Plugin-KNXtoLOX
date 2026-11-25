@@ -329,7 +329,12 @@ outgoingMqttMessage:
   emitUsingAddress: true
   emitUsingName: false
   emitValueAsString: false
-  ignoreReadCommands: false
+  # true: eingehende GroupValueRead-Telegramme vom Bus NICHT nach MQTT
+  # weiterreichen. knx-mqtt veroeffentlicht sie (entgegen README) auf dem
+  # normalen Werte-Topic mit LEEREM Payload - bin/bridge.js wuerde sie sonst
+  # als Wert an Loxone schicken. Eigene Leseanfragen (<prefix><ga>/read)
+  # sind davon nicht betroffen, deren Antworten kommen normal an.
+  ignoreReadCommands: true
 
 knx:
   etsExport: ""

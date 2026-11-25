@@ -237,7 +237,21 @@ async function main() {
     const target = addr && inputMap.get(addr);
     if (!target) { console.warn(`[knx] Keine Zuordnung fuer Topic "${topic}", ignoriert`); return; }
 
+    // Leerer Payload = GroupValueRead vom Bus (knx-mqtt veroeffentlicht Reads
+    // entgegen README auf dem normalen Werte-Topic, nicht auf ".../read") -
+    // normalerweise schon per ignoreReadCommands: true unterdrueckt, hier als
+    // zweite Absicherung (z.B. alte config.yaml). Ebenso nichts senden, wenn
+    // der Codec keinen gueltigen Wert liefert (zu kurzer Payload o.ae.) -
+    // sonst kommt "jdev/sps/io/<uuid>/null" bei Loxone an.
+    if (!message || message.length === 0) {
+      if (logLevel.enabled(logLevel.DEBUG)) console.log(`[knx] ${addr}: leerer Payload (Leseanfrage), ignoriert`);
+      return;
+    }
     const value = dptCodec.decode(target.dpt, message);
+    if (value === null || value === undefined || (typeof value === 'number' && !Number.isFinite(value))) {
+      console.warn(`[knx] ${addr}: Payload ${message.toString('hex')} nicht als DPT ${target.dpt} dekodierbar, ignoriert`);
+      return;
+    }
     recordActivity('knx->lox', addr, target.dpt, value);
     sendToLoxone(target.uuid, value);
   });

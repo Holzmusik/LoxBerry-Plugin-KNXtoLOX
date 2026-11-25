@@ -27,7 +27,9 @@ outgoingMqttMessage:
   emitUsingAddress: true
   emitUsingName: false
   emitValueAsString: false
-  ignoreReadCommands: false
+  # true: eingehende GroupValueRead-Telegramme NICHT weiterreichen - knx-mqtt
+  # veroeffentlicht sie auf dem Werte-Topic mit leerem Payload (siehe api.cgi).
+  ignoreReadCommands: true
 
 knx:
   etsExport: ""                # bewusst leer — eigene DPT-Decodierung, siehe oben
