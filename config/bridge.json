@@ -1,5 +1,7 @@
 {
-  "loxone": { "msno": 1 },
+  "loxone": {
+    "msno": 1
+  },
   "log_level": "info",
   "bus_mode": "gira",
   "gira_gateway": "192.168.1.50",
@@ -9,6 +11,13 @@
   "client_id": "loxberry-knxmqtt",
   "time_addr": "",
   "date_addr": "",
+  "mqtt_write_prefix": "knxlox/write/",
+  "read_on_connect": true,
+  "read_rate": 10,
+  "echo_window_ms": 1000,
+  "heartbeat_uuid": "",
+  "heartbeat_interval": 30,
+  "knx_timeout": 300,
   "knxd": {
     "device": "/dev/ttyAMA0",
     "own_addr": "0.0.1",

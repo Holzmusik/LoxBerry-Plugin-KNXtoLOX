@@ -56,15 +56,62 @@ Loxone-UUID-Felder:
   Schalter), nicht die UUID der Steuerung selbst - der eingebaute UUID-Picker
   unterscheidet das bereits (zwei getrennte Listen fuer Eingang/Ausgang).
 
+Optionale Felder pro Zeile (Spalte "Optionen" in der Web-UI):
+
+- `read_interval` (Sekunden, min. 10): GA zyklisch vom Bus lesen
+  (GroupValueRead, Ersatz fuer Loxones ReadStateTime).
+- `cyclic` (Sekunden, min. 10): letzten bekannten Ausgangswert zyklisch
+  erneut senden (Ersatz fuer Loxones Cyclic).
+- `send_on_connect`: Loxone-Wert auch direkt nach jeder (Re-)Verbindung
+  senden (siehe unten).
+
+### Verhalten Loxone <-> KNX (`bin/bridge.js`, `bin/bridgeLogic.js`)
+
+- **Kein Schreiben beim (Re-)Connect:** Loxone schickt nach jeder
+  Authentifizierung alle Zustaende. Die Bridge merkt sich je UUID den
+  letzten Wert (auch ueber einen Bridge-Neustart, in `/dev/shm`, nicht
+  ueber einen Reboot) und sendet nur echte Aenderungen. Ein Wert, der sich
+  waehrend der Trennung geaendert hat, wird nach dem Reconnect gesendet.
+- **Leseanfragen:** nach jeder Loxone-Verbindung (also auch beim Start)
+  fuer alle Eingangs-GAs, plus zyklisch per `read_interval`. Gedrosselt auf
+  `read_rate` Telegramme/s (Standard 10).
+- **Zweiter Rueckweg ohne sichtbaren Baustein:** Topic
+  `knxlox/write/<ga>` mit Klartextwert (Prefix in `bridge.json`
+  `mqtt_write_prefix`). Loxone-Befehl ueber einen virtuellen Ausgang und das
+  LoxBerry-MQTT-Gateway: `publish knxlox/write/1/2/3 <v>`. Nur GAs aus der
+  Tabelle, DPT aus der Tabelle; retained Nachrichten werden verworfen.
+- **Echo-Unterdrueckung:** ein Wert, der gerade vom Bus kam, wird nicht
+  innerhalb von `echo_window_ms` (Standard 1000) wieder auf dieselbe GA
+  geschrieben (Byte-Vergleich).
+- **Heartbeat:** alle `heartbeat_interval` s wird geprueft, ob MQTT, Loxone
+  und `knxmqtt.service` laufen und innerhalb von `knx_timeout` s (Standard
+  300, 0 = aus) ein Telegramm vom Bus kam. Nur dann zaehlt die Bridge auf
+  dem virtuellen Eingang `heartbeat_uuid` hoch; Loxone ueberwacht den
+  Zaehler per Watchdog. Zustand auch auf der Status-Seite.
+
+Hinweis zu knx-mqtt: es veroeffentlicht eingehende GroupValueRead-Telegramme
+(entgegen seinem README) auf dem normalen Werte-Topic mit leerem Payload.
+Deshalb `ignoreReadCommands: true` und ein fester knx-mqtt-Commit in
+`postroot.sh` (`KNXMQTT_COMMIT`). Ein GroupValueResponse kann knx-mqtt nicht
+senden - Leseanfragen vom Bus fuer GAs, die Loxone "besitzt", beantwortet
+die Bridge daher (noch) nicht.
+
 ### DPT-Codec (`bin/dptCodec.js`)
 
 Dispatcht nach KNX-Hauptgruppe (Zahl vor dem Punkt), nicht nach exaktem
 Subtyp - deckt damit praktisch jeden real vorkommenden DPT ab, ohne ihn
 einzeln zu kennen: 1.x (bool), 3.x (4-Bit), 5.x (8-Bit, 5.001 mit
 Prozent-Skalierung), 6.x (8-Bit signed), 7.x/8.x (16-Bit), 9.x (KNX-Float16),
-10.x/11.x (Zeit/Datum, nur fuer den Zeitgeber), 12.x/13.x (32-Bit),
-14.x (IEEE-754-Float), 17.x/18.x/20.x (Szene/Enum, 1 Byte roh). Unbekannte
-Hauptgruppen fallen auf Rohbyte-Durchreichung zurueck statt zu werfen.
+10.x (Uhrzeit; an Loxone als Sekunden seit Mitternacht), 11.x (Datum; an
+Loxone als JJJJMMTT), 12.x/13.x (32-Bit), 14.x (IEEE-754-Float),
+16.000/16.001 (14-Byte-Text ASCII/Latin-1), 17.x/18.x/20.x (Szene/Enum,
+1 Byte roh), 232.600 (RGB; Loxone-Format BBBGGGRRR in Prozent, ausserdem
+`hsv(h,s,v)`, `rgb(r,g,b)`, `#RRGGBB`). Ungueltige Werte (NaN, leerer Text,
+zu kurzer Payload) werden in beide Richtungen verworfen statt als 0
+gesendet. Unbekannte Hauptgruppen fallen auf Rohbyte-Durchreichung zurueck
+statt zu werfen.
+
+Tests ohne Bus: `node --test test/*.test.js` (bzw. `npm test` in `bin/`).
 
 ## ETS-Projekt-Import (`bin/knxproj_import.py`)
 
@@ -111,6 +158,10 @@ Enthaelt keine Zugangsdaten - die kommen ohnehin aus LoxBerry selbst.
   ist noch nicht gegen alle Zielgeraetetypen verifiziert.
 - MQTT-Passwort liegt (wie bei knx-mqtt vorgegeben) im Klartext in
   `config.yaml`.
+- GroupValueRead vom Bus beantworten (GAs, die Loxone "besitzt"): braucht
+  einen knx-mqtt-Fork mit Response-Befehl.
+- Eigener Miniserver-Benutzer mit minimalen Rechten statt des Admin-Kontos
+  aus LoxBerrys `general.json`.
 - Mehrsprachigkeit der Web-UI: aktuell nur Deutsch.
 
 ## Lizenz
