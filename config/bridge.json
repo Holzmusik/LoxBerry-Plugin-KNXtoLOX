@@ -17,6 +17,7 @@
   "echo_window_ms": 1000,
   "heartbeat_uuid": "",
   "heartbeat_interval": 30,
+  "heartbeat_probe_addr": "",
   "knx_timeout": 300,
   "knxd": {
     "device": "/dev/ttyAMA0",

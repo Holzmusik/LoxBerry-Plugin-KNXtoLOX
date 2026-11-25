@@ -5,7 +5,9 @@ const path = require('path');
 const yaml = require('js-yaml');
 const mqtt = require('mqtt');
 const dptCodec = require('./dptCodec');
-const { toBool, toInterval, LoxChangeFilter, EchoGuard, ReadQueue, assessHealth } = require('./bridgeLogic');
+const {
+  toBool, toInterval, LoxChangeFilter, EchoGuard, ReadQueue, assessHealth, isGroupAddress, valueTopicAddr,
+} = require('./bridgeLogic');
 const { execFile } = require('child_process');
 const loxberrylog = require('./loxberrylog');
 
@@ -224,8 +226,19 @@ async function main() {
   // der Wert ist bekannt, er soll nur nicht beim Connect ausgeloest werden.
   const lastOut = new Map(); // addr -> value
 
-  // Punkt 8: Zeitpunkt des letzten Telegramms vom Bus (beliebige abonnierte GA)
+  // Punkt 8: Zeitpunkt des letzten Telegramms vom Bus (beliebige GA)
   let lastKnxRx = 0;
+  // Punkt 8: Pruefadresse - eine GA, deren Geraet auf Leseanfragen antwortet
+  // (R-Flag, z.B. ein Aktor-Status). Die Bridge liest sie in jedem
+  // Heartbeat-Intervall; die Antwort beweist den ganzen Weg LoxBerry ->
+  // knx-mqtt -> Gateway -> Bus -> Geraet -> zurueck, unabhaengig davon, ob
+  // gerade jemand im Haus etwas bedient. Muss NICHT in der GA-Tabelle stehen.
+  const probeAddr = (() => {
+    const a = String(cfg.heartbeat_probe_addr || '').trim();
+    if (!a) return '';
+    if (!isGroupAddress(a)) { console.warn(`[heartbeat] Pruefadresse "${a}" ist keine Gruppenadresse (x/y/z), ignoriert`); return ''; }
+    return a;
+  })();
 
   // ── MQTT Client ────────────────────────────────────────────
   const mqttClient = mqtt.connect({
@@ -238,15 +251,14 @@ async function main() {
     reconnectPeriod: 5000,
   });
 
-  // Gezieltes Abo nur der konfigurierten Gruppenadressen (kein Wildcard+lokaler
-  // Filter wie bei MiraiPanel) — der Broker liefert dann gar keinen
-  // irrelevanten GA-Traffic an diesen Prozess, das entspricht dem Wunsch nach
-  // "möglichst effizient, nur relevante Daten". topicToAddr bildet das
-  // abonnierte Topic zurück auf die Gruppenadresse ab (siehe Kommentar beim
-  // message-Handler, wieso das noetig ist).
-  const topicToAddr = new Map();
-  for (const addr of inputMap.keys()) topicToAddr.set(joinTopic(topicPrefix, addr), addr);
-  const inputTopics = [...topicToAddr.keys()];
+  // Abo ALLER Bus-Telegramme (<prefix>+/+/+), lokal gefiltert: weitergeleitet
+  // an Loxone wird weiterhin nur, was in inputMap steht (Allowlist). Jedes
+  // Telegramm zaehlt aber als Lebenszeichen des Busses fuer den Heartbeat
+  // (Punkt 8) - frueher wurden nur die Tabellen-GAs abonniert, dann hing die
+  // Ausfallerkennung davon ab, ob gerade jemand im Haus eine davon benutzt.
+  // Eigene Befehle (".../read", ".../write-bytes") haben eine Ebene mehr und
+  // fallen nicht darunter. KNX-Buslast ist gering (wenige Telegramme/s).
+  const busTopic = joinTopic(topicPrefix, '+/+/+');
 
   // Punkt 6: zweiter Rueckweg Loxone -> KNX ohne beobachtete State-UUID.
   // Loxone (virtueller Ausgang ueber das LoxBerry-MQTT-Gateway) publiziert
@@ -273,11 +285,12 @@ async function main() {
       if (err) console.error('[mqtt] Abo fuer Schreibbefehle fehlgeschlagen:', err.message);
       else console.log(`[mqtt] Schreibbefehle auf ${writePrefix}<ga> aktiv (${gaDpt.size} GA(s) mit DPT)`);
     });
-    if (inputTopics.length === 0) return;
-    mqttClient.subscribe(inputTopics, { qos }, (err) => {
+    mqttClient.subscribe(busTopic, { qos }, (err) => {
       if (err) console.error('[mqtt] Abo fehlgeschlagen:', err.message);
-      else console.log(`[mqtt] ${inputTopics.length} Gruppenadresse(n) abonniert`);
+      else console.log(`[mqtt] Bus-Telegramme abonniert (${busTopic}), ${inputMap.size} davon -> Loxone`);
     });
+    // Pruefadresse sofort lesen, damit der erste Heartbeat schon eine Antwort hat
+    if (probeAddr) readQueue.enqueue(probeAddr);
   });
 
   // Punkt 2: Leseanfragen (GroupValueRead) ueber knx-mqtt "<prefix><ga>/read".
@@ -330,14 +343,15 @@ async function main() {
   // type=json/value/..., solange kein ETS-Adressbuch importiert ist — siehe
   // Kommentar in config.yaml.default). Bei type=bytes ist der Payload DIREKT
   // der rohe KNX-Bytestring (kein JSON, kein base64), die Gruppenadresse
-  // steckt stattdessen im Topic-Pfad, deshalb hier ueber topicToAddr statt
-  // ueber ein JSON-Feld aufgeloest.
+  // steckt stattdessen im Topic-Pfad, deshalb hier ueber valueTopicAddr()
+  // statt ueber ein JSON-Feld aufgeloest.
   mqttClient.on('message', (topic, message, packet) => {
     if (topic.startsWith(writePrefix)) { handleMqttWrite(topic, message, packet); return; }
-    const addr = topicToAddr.get(topic);
-    const target = addr && inputMap.get(addr);
-    if (!target) { console.warn(`[knx] Keine Zuordnung fuer Topic "${topic}", ignoriert`); return; }
-    lastKnxRx = Date.now();
+    const addr = valueTopicAddr(topicPrefix, topic);
+    if (!addr) return;
+    lastKnxRx = Date.now(); // jedes Bus-Telegramm = Lebenszeichen (Punkt 8)
+    const target = inputMap.get(addr);
+    if (!target) return; // nicht in der Tabelle -> nur Lebenszeichen
 
     // Leerer Payload = GroupValueRead vom Bus (knx-mqtt veroeffentlicht Reads
     // entgegen README auf dem normalen Werte-Topic, nicht auf ".../read") -
@@ -533,7 +547,8 @@ async function main() {
   // Wert hoch - aber NUR solange alles ok ist. Bleibt der Zaehler stehen,
   // loest Loxones Watchdog-Logik aus. knx_timeout (Standard 300 s, 0 = aus):
   // so lange darf kein Telegramm vom Bus kommen, bevor KNX als ausgefallen
-  // gilt - dafuer sollte mindestens eine GA mit read_interval laufen.
+  // gilt - zuverlaessig nur mit Pruefadresse (heartbeat_probe_addr), weil
+  // normaler Busverkehr von der Nutzung abhaengt.
   const hbUuid = String(cfg.heartbeat_uuid || '').trim().toLowerCase();
   const hbInterval = toInterval(cfg.heartbeat_interval === undefined ? 30 : cfg.heartbeat_interval, 5) || 30;
   const knxTimeoutSec = cfg.knx_timeout === undefined ? 300 : Math.max(0, Number(cfg.knx_timeout) || 0);
@@ -562,6 +577,9 @@ async function main() {
     } else if (!health.ok) {
       console.warn(`[heartbeat] gestoert: ${health.reasons.join(', ')}`);
     }
+    // Erst bewerten, dann die naechste Pruef-Leseanfrage stellen: jeder Tick
+    // beurteilt die Antwort auf die Anfrage des vorherigen Ticks.
+    if (probeAddr) readQueue.enqueue(probeAddr);
     try {
       fs.writeFileSync(PATHS.health, JSON.stringify({
         ts: localTimestamp(),
@@ -572,6 +590,7 @@ async function main() {
         knx_service: knxServiceState || null,
         last_knx_rx: lastKnxRx ? localTimestampOf(new Date(lastKnxRx)) : null,
         knx_timeout: knxTimeoutSec,
+        probe_addr: probeAddr || null,
         heartbeat_uuid: hbUuid || null,
         heartbeat_counter: hbCounter,
       }));
@@ -581,7 +600,8 @@ async function main() {
   }
   pollKnxService();
   setInterval(heartbeatTick, hbInterval * 1000);
-  console.log(`[heartbeat] Pruefung alle ${hbInterval} s, KNX-Timeout ${knxTimeoutSec || 'aus'}` +
+  console.log(`[heartbeat] Pruefung alle ${hbInterval} s, KNX-Timeout ${knxTimeoutSec || 'aus'}, ` +
+    `Pruefadresse ${probeAddr || '-'}` +
     (hbUuid ? `, Zaehler -> ${hbUuid}` : ' (kein heartbeat_uuid)'));
 
   console.log(`[lox] Verbinde mit ${loxConn.host}:${loxConn.port || 80}…`);

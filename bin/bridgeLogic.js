@@ -155,4 +155,24 @@ function assessHealth({ mqtt, lox, knxService, lastKnxRx, now, knxTimeoutSec }) 
   return { ok: reasons.length === 0, reasons };
 }
 
-module.exports = { toBool, toInterval, sameValue, LoxChangeFilter, EchoGuard, ReadQueue, assessHealth };
+// ── Topics von knx-mqtt ─────────────────────────────────────────────────────
+const GA_RE = /^\d{1,2}\/\d{1,2}\/\d{1,3}$/;
+
+function isGroupAddress(s) {
+  return typeof s === 'string' && GA_RE.test(s.trim());
+}
+
+// "<prefix>1/2/3" -> "1/2/3"; alles andere (eigene ".../read" und
+// ".../write-bytes"-Befehle, fremde Topics) -> null. knx-mqtt veroeffentlicht
+// Bus-Telegramme genau auf <prefix><Haupt>/<Mittel>/<Unter>.
+function valueTopicAddr(prefix, topic) {
+  const p = prefix.endsWith('/') ? prefix : prefix + '/';
+  if (!topic.startsWith(p)) return null;
+  const rest = topic.slice(p.length);
+  return GA_RE.test(rest) ? rest : null;
+}
+
+module.exports = {
+  toBool, toInterval, sameValue, LoxChangeFilter, EchoGuard, ReadQueue, assessHealth,
+  isGroupAddress, valueTopicAddr,
+};

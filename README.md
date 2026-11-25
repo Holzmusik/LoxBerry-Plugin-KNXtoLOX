@@ -85,7 +85,11 @@ Optionale Felder pro Zeile (Spalte "Optionen" in der Web-UI):
   geschrieben (Byte-Vergleich).
 - **Heartbeat:** alle `heartbeat_interval` s wird geprueft, ob MQTT, Loxone
   und `knxmqtt.service` laufen und innerhalb von `knx_timeout` s (Standard
-  300, 0 = aus) ein Telegramm vom Bus kam. Nur dann zaehlt die Bridge auf
+  300, 0 = aus) ein Telegramm vom Bus kam. Jedes Bus-Telegramm zaehlt
+  (Abo `knx/+/+/+`, an Loxone geht trotzdem nur die Tabelle). Weil Verkehr
+  von der Nutzung abhaengt, liest die Bridge zusaetzlich in jedem Intervall
+  die Pruefadresse `heartbeat_probe_addr` (ein Geraet mit Lesen-Flag) - die
+  Antwort beweist den ganzen Weg bis zum Bus-Geraet. Nur dann zaehlt die Bridge auf
   dem virtuellen Eingang `heartbeat_uuid` hoch; Loxone ueberwacht den
   Zaehler per Watchdog. Zustand auch auf der Status-Seite.
 

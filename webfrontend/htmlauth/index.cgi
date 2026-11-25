@@ -331,12 +331,19 @@ print <<'HTML';
       <div class="hint" style="margin-bottom:14px">
         Solange MQTT, Loxone und knx-mqtt laufen und innerhalb des KNX-Timeouts ein Telegramm vom Bus
         kam, zaehlt die Bridge auf dem angegebenen virtuellen Eingang hoch. Bleibt der Wert stehen,
-        ist die KNX-Anbindung gestoert (in Loxone z.B. per Watchdog-Logik ueberwachen). Damit der
-        Timeout greifen kann, sollte mindestens eine Gruppenadresse mit "Lesen alle ... s" laufen.
+        ist die KNX-Anbindung gestoert (in Loxone z.B. per Watchdog-Logik ueberwachen).
+        <br>Damit das nicht vom Busverkehr im Haus abhaengt, liest die Bridge in jedem Intervall die
+        <b>Pruefadresse</b>. Dafuer eine Gruppenadresse waehlen, deren Geraet auf Leseanfragen antwortet
+        (Lesen-Flag gesetzt, z.B. ein Aktor-Status oder Temperaturwert). Sie muss nicht in der
+        Gruppenadressen-Tabelle stehen. Jedes andere Bus-Telegramm zaehlt zusaetzlich.
       </div>
       <div class="field">
         <label>Virtueller Eingang (UUID, leer = kein Zaehler)</label>
         <input type="text" id="heartbeat_uuid" data-role="none" placeholder="Loxone-UUID des virtuellen Eingangs">
+      </div>
+      <div class="field">
+        <label>Pruefadresse (wird jedes Intervall gelesen, leer = aus)</label>
+        <input type="text" id="heartbeat_probe_addr" data-role="none" placeholder="z.B. 0/0/24">
       </div>
       <div class="row">
         <div class="field"><label>Intervall (s)</label><input type="number" id="heartbeat_interval" data-role="none" min="5" placeholder="30"></div>
@@ -497,7 +504,7 @@ let GA_ROWS = [];
 // Neuinstallation tatsaechlich der neue Stand geladen wurde - haeufigste
 // Fehlerquelle beim Debuggen "aus der Ferne" ist sonst der Browser-Cache
 // oder ein vergessener Reinstall.
-const UI_BUILD = '2026-11-25-1';
+const UI_BUILD = '2026-11-25-2';
 console.log('[KNXtoLOX] index.cgi UI_BUILD=' + UI_BUILD);
 
 // Client-seitiger Mitschnitt jeder api()/uploadForm()-Anfrage - sichtbar auf
@@ -597,6 +604,7 @@ function currentConfigForm() {
     echo_window_ms: numField('echo_window_ms', 1000),
     heartbeat_uuid: document.getElementById('heartbeat_uuid').value.trim(),
     heartbeat_interval: numField('heartbeat_interval', 30),
+    heartbeat_probe_addr: document.getElementById('heartbeat_probe_addr').value.trim(),
     knx_timeout: numField('knx_timeout', 300),
     knxd: {
       device: document.getElementById('knxd_device').value,
@@ -632,6 +640,7 @@ function fillConfigForm(c) {
   document.getElementById('echo_window_ms').value = numOr(c.echo_window_ms, 1000);
   document.getElementById('heartbeat_uuid').value = c.heartbeat_uuid || '';
   document.getElementById('heartbeat_interval').value = numOr(c.heartbeat_interval, 30);
+  document.getElementById('heartbeat_probe_addr').value = c.heartbeat_probe_addr || '';
   document.getElementById('knx_timeout').value = numOr(c.knx_timeout, 300);
   const k = c.knxd || {};
   document.getElementById('knxd_own_addr').value = k.own_addr || '';
@@ -976,6 +985,7 @@ function applyHealth(h, bridgeRunning) {
   if (t1) t1.textContent = txt + (h && h.ts ? ' (Stand ' + h.ts + ')' : '');
   if (det) det.textContent = h ? (
     'Letztes KNX-Telegramm: ' + (h.last_knx_rx || 'noch keines') +
+    ' | Pruefadresse: ' + (h.probe_addr || 'keine') +
     ' | KNX-Timeout: ' + (h.knx_timeout ? h.knx_timeout + ' s' : 'aus') +
     ' | Zaehler: ' + (h.heartbeat_uuid ? h.heartbeat_counter : 'kein virtueller Eingang konfiguriert')
   ) : '';

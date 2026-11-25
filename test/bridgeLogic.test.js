@@ -114,3 +114,17 @@ test('Punkt 8: Gesamtzustand', () => {
   assert.equal(L.assessHealth({ ...base, now: 1000 + 301000 }).ok, false, 'Timeout');
   assert.equal(L.assessHealth({ ...base, lastKnxRx: 0, knxTimeoutSec: 0 }).ok, true, 'Timeout-Pruefung aus');
 });
+
+test('knx-mqtt-Topics', () => {
+  assert.equal(L.valueTopicAddr('knx/', 'knx/1/2/3'), '1/2/3');
+  assert.equal(L.valueTopicAddr('knx', 'knx/14/1/1'), '14/1/1');
+  assert.equal(L.valueTopicAddr('knx/', 'knx/0/0/24'), '0/0/24');
+  assert.equal(L.valueTopicAddr('knx/', 'knx/1/2/3/read'), null, 'eigene Leseanfrage');
+  assert.equal(L.valueTopicAddr('knx/', 'knx/1/2/3/write-bytes'), null, 'eigener Schreibbefehl');
+  assert.equal(L.valueTopicAddr('knx/', 'knxlox/write/1/2/3'), null);
+  assert.equal(L.valueTopicAddr('knx/', 'knx/a/b/c'), null);
+  assert.equal(L.isGroupAddress('0/0/24'), true);
+  assert.equal(L.isGroupAddress(' 1/2/1 '), true);
+  assert.equal(L.isGroupAddress('1.2.1'), false);
+  assert.equal(L.isGroupAddress(''), false);
+});

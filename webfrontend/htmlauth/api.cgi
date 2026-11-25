@@ -215,6 +215,7 @@ my %SETTINGS_DEFAULTS = (
     echo_window_ms     => 1000,            # Punkt 7: 0 = Echo-Unterdrueckung aus
     heartbeat_uuid     => '',              # Punkt 8: virtueller Eingang fuer den Zaehler, leer = aus
     heartbeat_interval => 30,              # Punkt 8: Sekunden
+    heartbeat_probe_addr => '',            # Punkt 8: GA, die jedes Intervall gelesen wird (muss antworten)
     knx_timeout        => 300,             # Punkt 8: Sekunden ohne Bus-Telegramm bis "gestoert", 0 = aus
     knxd         => {
         device => '/dev/ttyAMA0', own_addr => '0.0.1', pool_start => '0.0.2',
