@@ -375,7 +375,9 @@ async function main() {
       return;
     }
     echoGuard.noteBusValue(addr, message);
-    const value = dptCodec.decode(target.dpt, message);
+    // decodeWire: knx-mqtt liefert bei DPTs > 6 Bit ein fuehrendes Byte mit
+    // (6-Bit-Feld des APCI-Oktetts), siehe dptCodec.js "Leitungsformat".
+    const value = dptCodec.decodeWire(target.dpt, message);
     if (value === null || value === undefined || (typeof value === 'number' && !Number.isFinite(value))) {
       console.warn(`[knx] ${addr}: Payload ${message.toString('hex')} nicht als DPT ${target.dpt} dekodierbar, ignoriert`);
       return;
@@ -464,7 +466,9 @@ async function main() {
   // outgoingMqttMessage.type=bytes auf der Lese-Seite (siehe config.yaml.default).
   function publishToKnx(addr, dpt, value, source = 'lox->knx') {
     if (!mqttClient.connected) { console.error(`[knx] Keine MQTT-Verbindung — Schreibbefehl für ${addr} verworfen`); return; }
-    const buf = dptCodec.encode(dpt, value);
+    // encodeWire: "/write-bytes" erwartet das Leitungsformat von knx-go (bei
+    // DPTs > 6 Bit mit fuehrendem 0x00), siehe dptCodec.js.
+    const buf = dptCodec.encodeWire(dpt, value);
     if (buf === null) {
       console.warn(`[knx] ${addr}: Wert "${value}" ist kein gueltiger DPT-${dpt}-Wert, nicht gesendet`);
       return;
@@ -534,13 +538,13 @@ async function main() {
       if (!mqttClient.connected) return;
       const now = new Date();
       if (timeAddr) {
-        const tbuf = dptCodec.encodeTimeOfDay(now);
+        const tbuf = dptCodec.toWire('10.001', dptCodec.encodeTimeOfDay(now));
         mqttClient.publish(joinTopic(topicPrefix, timeAddr) + '/write-bytes', tbuf, { qos: 0, retain: false });
         ownWrites.noteBusValue(timeAddr, tbuf);
         recordActivity('zeitgeber', timeAddr, '10.001', now.toLocaleTimeString('de-DE'), 'Systemzeit');
       }
       if (dateAddr) {
-        const dbuf = dptCodec.encodeDate(now);
+        const dbuf = dptCodec.toWire('11.001', dptCodec.encodeDate(now));
         mqttClient.publish(joinTopic(topicPrefix, dateAddr) + '/write-bytes', dbuf, { qos: 0, retain: false });
         ownWrites.noteBusValue(dateAddr, dbuf);
         recordActivity('zeitgeber', dateAddr, '11.001', now.toLocaleDateString('de-DE'), 'Systemdatum');

@@ -223,3 +223,44 @@ test('unbekannter DPT', () => {
   assert.equal(c.encode('99.001', 'x'), null);
   assert.equal(hex(c.encode('', 7)), '07');
 });
+
+test('Leitungsformat knx-mqtt/knx-go: Empfang', () => {
+  // Befund 2026-11-25: 1/2/2 (9.007) Bus-Wert 0x1546 = 54 %, knx-mqtt liefert 00 15 46
+  assert.equal(c.decodeWire('9.007', B('001546')), 54);
+  assert.equal(c.decodeWire('9.001', B('000c33')), 21.5);
+  assert.equal(c.decodeWire('9.001', B('0c33')), 21.5, 'ohne fuehrendes Byte weiterhin korrekt');
+  assert.equal(c.decodeWire('11.001', B('00190b1a')), 20261125);
+  assert.equal(c.decodeWire('10.001', B('006d2d1e')), 13 * 3600 + 45 * 60 + 30);
+  assert.equal(c.decodeWire('5.001', B('00ff')), 100);
+  assert.equal(c.decodeWire('5.001', B('ff')), 100);
+  assert.equal(c.decodeWire('7.001', B('001234')), 0x1234);
+  assert.equal(c.decodeWire('12.001', B('0000010000')), 65536);
+  assert.equal(c.decodeWire('14.056', B('003fc00000')), 1.5);
+  assert.equal(c.decodeWire('232.600', B('00ff0000')), 100);
+  assert.equal(c.decodeWire('16.000', Buffer.concat([B('00'), c.encode('16.000', 'Hallo')])), 'Hallo');
+  // <= 6 Bit: Wert steckt im ersten (einzigen) Byte, nichts entfernen
+  assert.equal(c.decodeWire('1.001', B('01')), 1);
+  assert.equal(c.decodeWire('1.001', B('00')), 0);
+  assert.equal(c.decodeWire('3.007', B('09')), 9);
+  // unbekannter DPT
+  assert.equal(c.decodeWire('99.001', B('002a')), 42);
+  assert.equal(c.decodeWire('99.001', B('2a')), 42);
+  assert.equal(c.decodeWire('9.001', Buffer.alloc(0)), null);
+});
+
+test('Leitungsformat knx-mqtt/knx-go: Senden', () => {
+  assert.equal(hex(c.encodeWire('9.001', 21.5)), '000c33');
+  assert.equal(hex(c.encodeWire('9.007', 54)), '001546');
+  assert.equal(hex(c.encodeWire('1.001', 1)), '01', 'DPT 1 ohne Praefix');
+  assert.equal(hex(c.encodeWire('3.007', 9)), '09', 'DPT 3 ohne Praefix');
+  assert.equal(hex(c.encodeWire('5.001', 100)), '00ff');
+  assert.equal(hex(c.encodeWire('11.001', 20261125)), '00190b1a');
+  assert.equal(hex(c.encodeWire('232.600', 100)), '00ff0000');
+  assert.equal(c.encodeWire('16.000', 'Hallo').length, 15);
+  assert.equal(c.encodeWire('9.001', 'abc'), null);
+  assert.equal(hex(c.toWire('10.001', c.encodeTimeOfDay(new Date(2026, 10, 25, 13, 45, 30)))), '006d2d1e');
+  // Rundlauf
+  for (const [dpt, v] of [['9.001', -5], ['5.001', 50], ['13.010', -1], ['1.001', 1], ['11.001', 20261125]]) {
+    assert.equal(c.decodeWire(dpt, c.encodeWire(dpt, v)), v, dpt);
+  }
+});

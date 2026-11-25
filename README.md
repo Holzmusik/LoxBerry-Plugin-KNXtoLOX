@@ -115,6 +115,13 @@ zu kurzer Payload) werden in beide Richtungen verworfen statt als 0
 gesendet. Unbekannte Hauptgruppen fallen auf Rohbyte-Durchreichung zurueck
 statt zu werfen.
 
+**Leitungsformat:** knx-go (unter knx-mqtt) legt das erste Datenbyte immer
+in das 6-Bit-Feld des APCI-Oktetts - in beide Richtungen. Bei DPTs ueber
+6 Bit kommt deshalb ein fuehrendes `00` mit (`00 0C 33` = 21,5 °C) und muss
+bei `/write-bytes` auch mitgesendet werden; DPT 1/2/3 haben nur dieses eine
+Byte. `encodeWire()`/`decodeWire()` erledigen das, `encode()`/`decode()`
+arbeiten mit den reinen Wert-Bytes.
+
 Tests ohne Bus: `node --test test/*.test.js` (bzw. `npm test` in `bin/`).
 
 ## ETS-Projekt-Import (`bin/knxproj_import.py`)

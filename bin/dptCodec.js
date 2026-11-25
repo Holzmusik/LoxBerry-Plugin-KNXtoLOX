@@ -359,8 +359,60 @@ function encode(dpt, value) {
   return Buffer.from([clampByte(n)]);
 }
 
+// ── Leitungsformat von knx-mqtt / knx-go ────────────────────────────────────
+// knx-go (die KNX-Bibliothek unter knx-mqtt) legt Data[0] IMMER in das
+// 6-Bit-Feld des APCI-Oktetts (cemi/tpdu.go AppData.Pack/Unpack), in BEIDE
+// Richtungen, und knx-mqtt reicht diese Bytes bei type=bytes bzw.
+// "/write-bytes" unveraendert durch:
+//   - DPT 1/2/3 (<= 6 Bit): der Wert steckt in diesem 6-Bit-Feld, 1 Byte.
+//   - alle groesseren DPTs: Data[0] ist 0x00, der Wert folgt ab Data[1],
+//     z.B. DPT 9 21,5 °C = 00 0C 33.
+// encode()/decode() oben arbeiten mit den reinen Wert-Bytes (wie in der
+// KNX-Spezifikation); encodeWire()/decodeWire() setzen bzw. entfernen das
+// fuehrende Byte. Bis v0.3.2 fehlte das: empfangene Werte wurden um ein Byte
+// verschoben dekodiert (54 % -> 0,21) und gesendete Werte kamen verstuemmelt
+// auf den Bus (erstes Wert-Byte im 6-Bit-Feld).
+const SHORT_GROUPS = new Set(['1', '2', '3', '23']);
+const VALUE_LEN = {
+  5: 1, 6: 1, 17: 1, 18: 1, 20: 1,
+  7: 2, 8: 2, 9: 2,
+  10: 3, 11: 3, 232: 3,
+  12: 4, 13: 4, 14: 4,
+  16: 14,
+};
+
+function isShortDpt(dpt) {
+  return SHORT_GROUPS.has(mainGroup(canonicalDpt(dpt)));
+}
+
+// Wert-Bytes -> Leitungsformat (fuer "/write-bytes")
+function toWire(dpt, buf) {
+  if (!buf) return null;
+  if (isShortDpt(dpt)) return buf;
+  return Buffer.concat([Buffer.from([0x00]), buf]);
+}
+
+// Leitungsformat (vom Bus) -> Wert-Bytes. Tolerant: kommt ein Payload ohne
+// fuehrendes Byte (genau die erwartete Laenge), bleibt er unveraendert.
+function fromWire(dpt, buf) {
+  if (!buf || buf.length === 0 || isShortDpt(dpt)) return buf;
+  const expected = VALUE_LEN[mainGroup(canonicalDpt(dpt))];
+  if (expected !== undefined) return buf.length === expected + 1 ? buf.subarray(1) : buf;
+  // unbekannter DPT: mehr als 1 Byte -> erstes Byte ist das 6-Bit-Feld
+  return buf.length > 1 ? buf.subarray(1) : buf;
+}
+
+function encodeWire(dpt, value) {
+  return toWire(dpt, encode(dpt, value));
+}
+
+function decodeWire(dpt, buf) {
+  return decode(dpt, fromWire(dpt, buf));
+}
+
 module.exports = {
   decode, encode, normalizeDpt, canonicalDpt,
+  encodeWire, decodeWire, toWire, fromWire, isShortDpt,
   encodeTimeOfDay, encodeDate,
   // fuer Tests
   encodeFloat16, decodeFloat16,
