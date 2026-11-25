@@ -209,6 +209,16 @@ async function main() {
     console.warn('[bridge] Keine Gruppenadresse ist einem Loxone-Ziel zugeordnet — bitte in der Gruppenadressen-Tabelle konfigurieren');
   }
 
+  // Punkt 7: Wert, der gerade vom Bus kam, nicht sofort zurueckschreiben.
+  // bridge.json echo_window_ms (Standard 1000, 0 = aus).
+  const echoGuard = new EchoGuard(Number.isFinite(Number(cfg.echo_window_ms)) ? Number(cfg.echo_window_ms) : 1000);
+
+  // Punkt 3: letzter bekannter Ausgangswert je GA (aus Loxone-Zustand oder
+  // MQTT-Schreibbefehl) - Quelle fuer das zyklische Senden. Wird auch fuer
+  // Werte gesetzt, die wegen Punkt 1 NICHT gesendet wurden (Initial-Dump):
+  // der Wert ist bekannt, er soll nur nicht beim Connect ausgeloest werden.
+  const lastOut = new Map(); // addr -> value
+
   // ── MQTT Client ────────────────────────────────────────────
   const mqttClient = mqtt.connect({
     host: mqttConn.host,
@@ -226,10 +236,6 @@ async function main() {
   // "möglichst effizient, nur relevante Daten". topicToAddr bildet das
   // abonnierte Topic zurück auf die Gruppenadresse ab (siehe Kommentar beim
   // message-Handler, wieso das noetig ist).
-  // Punkt 7: Wert, der gerade vom Bus kam, nicht sofort zurueckschreiben.
-  // bridge.json echo_window_ms (Standard 1000, 0 = aus).
-  const echoGuard = new EchoGuard(Number.isFinite(Number(cfg.echo_window_ms)) ? Number(cfg.echo_window_ms) : 1000);
-
   const topicToAddr = new Map();
   for (const addr of inputMap.keys()) topicToAddr.set(joinTopic(topicPrefix, addr), addr);
   const inputTopics = [...topicToAddr.keys()];
@@ -307,6 +313,7 @@ async function main() {
       return;
     }
     const value = message.toString('utf8').trim();
+    lastOut.set(addr, value);
     publishToKnx(addr, dpt, value, 'mqtt->knx');
   }
 
@@ -447,6 +454,7 @@ async function main() {
     }
     const target = outputMap.get(key);
     if (!target) return;
+    lastOut.set(target.addr, value);
     const send = loxFilter.shouldSend(key, value, target.sendOnConnect);
     scheduleLoxValuesSave();
     if (!send) {
@@ -458,6 +466,26 @@ async function main() {
 
   loxApi.on('update_event_value', (uuid, value) => handleLoxUpdate(uuid, value));
   loxApi.on('update_event_text',  (uuid, text)  => handleLoxUpdate(uuid, text));
+
+  // ── Punkt 3: zyklisches Senden Loxone -> KNX ─────────────────────────────
+  // Zeilenfeld cyclic (Sekunden, min. 10): letzten bekannten Wert periodisch
+  // erneut senden (Ersatz fuer Loxones Cyclic=60, z.B. Aussentemperatur fuer
+  // KNX-Raumregler). Solange noch kein Wert bekannt ist, wird nichts gesendet.
+  const cyclicByAddr = new Map();
+  for (const row of gaRows) {
+    if (!row || !row.addr) continue;
+    const sec = toInterval(row.cyclic, 10);
+    if (sec && sec > (cyclicByAddr.get(row.addr) || 0)) cyclicByAddr.set(row.addr, sec);
+  }
+  for (const [addr, sec] of cyclicByAddr) {
+    const dpt = gaDpt.get(addr);
+    if (!dpt) { console.warn(`[knx] ${addr}: cyclic gesetzt, aber kein DPT - zyklisches Senden aus`); continue; }
+    setInterval(() => {
+      if (!lastOut.has(addr)) return;
+      publishToKnx(addr, dpt, lastOut.get(addr), 'zyklisch');
+    }, sec * 1000);
+    console.log(`[knx] ${addr}: zyklisches Senden alle ${sec} s`);
+  }
 
   // ── KNX-Zeitgeber: periodischer Systemzeit-Push (DPT 10.001/11.001) ──────
   // Oeffentlicher KNX-Standard (nicht projektspezifisch geraten), siehe
