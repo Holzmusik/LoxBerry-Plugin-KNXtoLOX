@@ -5,6 +5,7 @@ const path = require('path');
 const yaml = require('js-yaml');
 const mqtt = require('mqtt');
 const dptCodec = require('./dptCodec');
+const { toBool, LoxChangeFilter } = require('./bridgeLogic');
 const loxberrylog = require('./loxberrylog');
 
 // ── Pfade: LoxBerry vs. lokale Entwicklung ─────────────────
@@ -39,6 +40,11 @@ const PATHS = {
   // RAM-Schreibvorgaenge sind praktisch kostenlos, jedes Ereignis schreibt
   // direkt.
   activity: '/dev/shm/knxmqtt-activity.json',
+  // Letzte Loxone-Ausgangswerte (Punkt 1, siehe bridgeLogic.LoxChangeFilter).
+  // Bewusst ebenfalls /dev/shm: ueberlebt einen Neustart der Bridge (dann
+  // werden echte Aenderungen waehrend der Auszeit erkannt), aber KEINEN
+  // Reboot - nach einem Reboot gibt es keine veralteten Werte.
+  loxValues: '/dev/shm/knxmqtt-loxvalues.json',
 };
 
 // Live-Aktivitaet fuer die Status-Seite: Ringpuffer der letzten Ereignisse
@@ -155,7 +161,7 @@ function loadMqttConn() {
 // Entspricht MiraiPanels buildStateFilter()-Prinzip: nur was hier explizit
 // konfiguriert ist, wird überhaupt verarbeitet/weitergeleitet.
 //   inputMap:  KNX-Gruppenadresse -> {uuid, dpt}   (KNX-Zustand -> Loxone schreiben)
-//   outputMap: Loxone-State-UUID  -> {addr, dpt}   (Loxone-Zustand -> KNX-Bus schreiben)
+//   outputMap: Loxone-State-UUID  -> {addr, dpt, sendOnConnect}   (Loxone-Zustand -> KNX-Bus schreiben)
 function buildMaps(rows) {
   const inputMap = new Map();
   const outputMap = new Map();
@@ -165,7 +171,11 @@ function buildMaps(rows) {
       inputMap.set(row.addr, { uuid: row.lox_input_uuid.toLowerCase(), dpt: row.dpt });
     }
     if (row.lox_output_uuid) {
-      outputMap.set(row.lox_output_uuid.toLowerCase(), { addr: row.addr, dpt: row.dpt });
+      outputMap.set(row.lox_output_uuid.toLowerCase(), {
+        addr: row.addr,
+        dpt: row.dpt,
+        sendOnConnect: toBool(row.send_on_connect),
+      });
     }
   }
   return { inputMap, outputMap };
@@ -267,8 +277,31 @@ async function main() {
     30000
   );
 
+  // Punkt 1: Initial-Dump nach jeder Authentifizierung nicht blind auf den
+  // Bus schreiben. Gemerkte Werte vom letzten Bridge-Lauf laden.
+  const loxFilter = new LoxChangeFilter();
+  try {
+    loxFilter.load(JSON.parse(fs.readFileSync(PATHS.loxValues, 'utf8')));
+    console.log('[lox] Letzte Ausgangswerte vom vorherigen Bridge-Lauf geladen');
+  } catch (e) {
+    if (e.code !== 'ENOENT') console.warn('[lox] Konnte gemerkte Ausgangswerte nicht laden:', e.message);
+  }
+  let loxValuesSaveTimer = null;
+  function scheduleLoxValuesSave() {
+    if (loxValuesSaveTimer) return;
+    loxValuesSaveTimer = setTimeout(() => {
+      loxValuesSaveTimer = null;
+      try { fs.writeFileSync(PATHS.loxValues, JSON.stringify(loxFilter.snapshot())); }
+      catch (e) { console.warn('[lox] Konnte Ausgangswerte nicht speichern:', e.message); }
+    }, 1000);
+  }
+
   let loxAuthorized = false;
-  loxApi.on('authorized',       () => { loxAuthorized = true; console.log('[lox] Authentifiziert ✓'); });
+  loxApi.on('authorized',       () => {
+    loxAuthorized = true;
+    loxFilter.newConnection();
+    console.log('[lox] Authentifiziert ✓ (Initial-Dump wird nur bei Aenderung bzw. send_on_connect weitergegeben)');
+  });
   loxApi.on('auth_failed',      () => { loxAuthorized = false; console.error('[lox] Authentifizierung fehlgeschlagen'); });
   loxApi.on('connect_failed',   () => { loxAuthorized = false; console.error('[lox] Verbindung fehlgeschlagen'); });
   loxApi.on('connection_error', (e) => console.error('[lox] Fehler:', e && e.message || e));
@@ -332,6 +365,12 @@ async function main() {
     }
     const target = outputMap.get(key);
     if (!target) return;
+    const send = loxFilter.shouldSend(key, value, target.sendOnConnect);
+    scheduleLoxValuesSave();
+    if (!send) {
+      if (logLevel.enabled(logLevel.DEBUG)) console.log(`[knx] ${target.addr} <- ${value}: unveraendert/Initialwert, nicht gesendet`);
+      return;
+    }
     publishToKnx(target.addr, target.dpt, value);
   }
 
