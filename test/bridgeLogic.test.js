@@ -72,3 +72,33 @@ test('Punkt 7: Echo-Unterdrueckung', () => {
   assert.equal(g.isEcho('1/2/3', b('80'), 11000), false, 'Fenster abgelaufen');
   assert.equal(new L.EchoGuard(0).isEcho('1/2/3', b('80'), 10000), false, '0 = aus');
 });
+
+test('Punkt 2: Leseanfragen gedrosselt und ohne Doppelte', (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const sent = [];
+  let online = true;
+  const q = new L.ReadQueue(10, (a) => sent.push(a), () => online);
+  q.enqueue(['1/2/1', '1/2/2', '1/2/1']);
+  q.enqueue('1/2/2');
+  assert.equal(q.size, 2, 'Doppelte entfernt');
+  t.mock.timers.tick(99);
+  assert.deepEqual(sent, [], 'noch nichts vor 100 ms');
+  t.mock.timers.tick(1);
+  assert.deepEqual(sent, ['1/2/1']);
+  online = false;
+  t.mock.timers.tick(500);
+  assert.deepEqual(sent, ['1/2/1'], 'angehalten solange offline');
+  online = true;
+  t.mock.timers.tick(100);
+  assert.deepEqual(sent, ['1/2/1', '1/2/2']);
+  q.enqueue('1/2/1');
+  t.mock.timers.tick(100);
+  assert.deepEqual(sent, ['1/2/1', '1/2/2', '1/2/1'], 'nach dem Senden erneut einreihbar');
+  q.stop();
+});
+
+test('Punkt 2: Rate wird begrenzt', () => {
+  assert.equal(new L.ReadQueue(10, () => {}).intervalMs, 100);
+  assert.equal(new L.ReadQueue(1000, () => {}).intervalMs, 20, 'max 50/s');
+  assert.equal(new L.ReadQueue(0, () => {}).intervalMs, 100, 'Standard 10/s');
+});

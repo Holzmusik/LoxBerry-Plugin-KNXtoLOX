@@ -5,7 +5,7 @@ const path = require('path');
 const yaml = require('js-yaml');
 const mqtt = require('mqtt');
 const dptCodec = require('./dptCodec');
-const { toBool, LoxChangeFilter, EchoGuard } = require('./bridgeLogic');
+const { toBool, toInterval, LoxChangeFilter, EchoGuard, ReadQueue } = require('./bridgeLogic');
 const loxberrylog = require('./loxberrylog');
 
 // ── Pfade: LoxBerry vs. lokale Entwicklung ─────────────────
@@ -168,7 +168,11 @@ function buildMaps(rows) {
   for (const row of rows) {
     if (!row || !row.addr) continue;
     if (row.lox_input_uuid) {
-      inputMap.set(row.addr, { uuid: row.lox_input_uuid.toLowerCase(), dpt: row.dpt });
+      inputMap.set(row.addr, {
+        uuid: row.lox_input_uuid.toLowerCase(),
+        dpt: row.dpt,
+        readInterval: toInterval(row.read_interval, 10),
+      });
     }
     if (row.lox_output_uuid) {
       outputMap.set(row.lox_output_uuid.toLowerCase(), {
@@ -262,6 +266,33 @@ async function main() {
     });
   });
 
+  // Punkt 2: Leseanfragen (GroupValueRead) ueber knx-mqtt "<prefix><ga>/read".
+  // Die Antwort kommt als normaler Wert auf dem abonnierten GA-Topic an und
+  // geht wie jeder andere Bus-Wert an Loxone.
+  //   - nach jeder Loxone-Authentifizierung (also auch beim Bridge-Start) fuer
+  //     alle Eingangs-GAs, abschaltbar mit bridge.json read_on_connect: false
+  //   - zyklisch fuer Zeilen mit read_interval (Sekunden, min. 10)
+  //   - gedrosselt auf read_rate Telegramme/s (Standard 10)
+  const readQueue = new ReadQueue(
+    Number(cfg.read_rate) || 10,
+    (addr) => {
+      mqttClient.publish(joinTopic(topicPrefix, addr) + '/read', '', { qos: (knxCfg.mqtt && knxCfg.mqtt.qos) || 0, retain: false });
+      if (logLevel.enabled(logLevel.DEBUG)) console.log(`[knx] Leseanfrage ${addr}`);
+    },
+    () => mqttClient.connected,
+  );
+  const readOnConnect = cfg.read_on_connect === undefined ? true : toBool(cfg.read_on_connect);
+  function readAllInputs(reason) {
+    if (!readOnConnect || inputMap.size === 0) return;
+    readQueue.enqueue([...inputMap.keys()]);
+    console.log(`[knx] ${inputMap.size} Leseanfrage(n) eingereiht (${reason})`);
+  }
+  for (const [addr, t] of inputMap) {
+    if (!t.readInterval) continue;
+    setInterval(() => readQueue.enqueue(addr), t.readInterval * 1000);
+    console.log(`[knx] ${addr}: zyklische Leseanfrage alle ${t.readInterval} s`);
+  }
+
   function handleMqttWrite(topic, message, packet) {
     const addr = topic.slice(writePrefix.length);
     // Retained-Nachrichten wuerden nach jedem Bridge-Neustart erneut auf den
@@ -346,6 +377,7 @@ async function main() {
   loxApi.on('authorized',       () => {
     loxAuthorized = true;
     loxFilter.newConnection();
+    readAllInputs('Loxone verbunden');
     console.log('[lox] Authentifiziert ✓ (Initial-Dump wird nur bei Aenderung bzw. send_on_connect weitergegeben)');
   });
   loxApi.on('auth_failed',      () => { loxAuthorized = false; console.error('[lox] Authentifizierung fehlgeschlagen'); });

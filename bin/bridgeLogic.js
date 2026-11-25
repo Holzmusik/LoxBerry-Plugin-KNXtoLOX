@@ -91,4 +91,47 @@ class EchoGuard {
   }
 }
 
-module.exports = { toBool, toInterval, sameValue, LoxChangeFilter, EchoGuard };
+// ── Punkt 2: gedrosselte Leseanfragen ──────────────────────────────────────
+// Sammelt GAs (jede hoechstens einmal in der Warteschlange) und gibt sie mit
+// max. ratePerSec Telegrammen/s an send() weiter, damit der Bus beim Start
+// (alle Eingangs-GAs auf einmal) nicht geflutet wird. canSend() = false
+// (z.B. MQTT getrennt) haelt die Warteschlange an, ohne etwas zu verwerfen.
+class ReadQueue {
+  constructor(ratePerSec, send, canSend = () => true) {
+    this.intervalMs = Math.round(1000 / Math.max(1, Math.min(50, ratePerSec || 10)));
+    this.send = send;
+    this.canSend = canSend;
+    this.queue = [];
+    this.pending = new Set();
+    this.timer = null;
+  }
+
+  enqueue(addrs) {
+    for (const a of Array.isArray(addrs) ? addrs : [addrs]) {
+      if (this.pending.has(a)) continue;
+      this.pending.add(a);
+      this.queue.push(a);
+    }
+    if (this.queue.length && !this.timer) {
+      this.timer = setInterval(() => this._tick(), this.intervalMs);
+      if (this.timer.unref) this.timer.unref();
+    }
+  }
+
+  get size() { return this.queue.length; }
+
+  _tick() {
+    if (!this.queue.length) { clearInterval(this.timer); this.timer = null; return; }
+    if (!this.canSend()) return;
+    const a = this.queue.shift();
+    this.pending.delete(a);
+    this.send(a);
+  }
+
+  stop() {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+  }
+}
+
+module.exports = { toBool, toInterval, sameValue, LoxChangeFilter, EchoGuard, ReadQueue };
