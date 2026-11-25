@@ -230,14 +230,54 @@ async function main() {
   for (const addr of inputMap.keys()) topicToAddr.set(joinTopic(topicPrefix, addr), addr);
   const inputTopics = [...topicToAddr.keys()];
 
+  // Punkt 6: zweiter Rueckweg Loxone -> KNX ohne beobachtete State-UUID.
+  // Loxone (virtueller Ausgang ueber das LoxBerry-MQTT-Gateway) publiziert
+  // den Klartextwert auf <writePrefix><ga>, z.B. "knxlox/write/1/2/3" = "21.5".
+  // Nur GAs aus der Tabelle (mit DPT) werden angenommen; der DPT kommt aus
+  // der Tabelle. Gleiche Werte nacheinander werden NICHT unterdrueckt
+  // (Taster/Impulse), nur Echos (Punkt 7).
+  const writePrefix = (() => {
+    const p = (cfg.mqtt_write_prefix || 'knxlox/write/').trim();
+    return p.endsWith('/') ? p : p + '/';
+  })();
+  const gaDpt = new Map();
+  for (const row of gaRows) {
+    if (row && row.addr && row.dpt && !gaDpt.has(row.addr)) gaDpt.set(row.addr, row.dpt);
+  }
+  if (writePrefix.startsWith(topicPrefix.endsWith('/') ? topicPrefix : topicPrefix + '/')) {
+    console.warn(`[mqtt] mqtt_write_prefix "${writePrefix}" liegt unter dem knx-mqtt-Prefix "${topicPrefix}" - bitte einen eigenen Prefix waehlen`);
+  }
+
   mqttClient.on('connect', () => {
     console.log('[mqtt] Verbunden mit Broker');
+    const qos = (knxCfg.mqtt && knxCfg.mqtt.qos) || 0;
+    mqttClient.subscribe(writePrefix + '#', { qos }, (err) => {
+      if (err) console.error('[mqtt] Abo fuer Schreibbefehle fehlgeschlagen:', err.message);
+      else console.log(`[mqtt] Schreibbefehle auf ${writePrefix}<ga> aktiv (${gaDpt.size} GA(s) mit DPT)`);
+    });
     if (inputTopics.length === 0) return;
-    mqttClient.subscribe(inputTopics, { qos: (knxCfg.mqtt && knxCfg.mqtt.qos) || 0 }, (err) => {
+    mqttClient.subscribe(inputTopics, { qos }, (err) => {
       if (err) console.error('[mqtt] Abo fehlgeschlagen:', err.message);
       else console.log(`[mqtt] ${inputTopics.length} Gruppenadresse(n) abonniert`);
     });
   });
+
+  function handleMqttWrite(topic, message, packet) {
+    const addr = topic.slice(writePrefix.length);
+    // Retained-Nachrichten wuerden nach jedem Bridge-Neustart erneut auf den
+    // Bus geschrieben (gleiches Problem wie Punkt 1) - deshalb verworfen.
+    if (packet && packet.retain) {
+      console.warn(`[mqtt] ${topic}: retained Schreibbefehl ignoriert (bitte ohne Retain publizieren)`);
+      return;
+    }
+    const dpt = gaDpt.get(addr);
+    if (!dpt) {
+      console.warn(`[mqtt] ${topic}: GA "${addr}" nicht in der Gruppenadressen-Tabelle (oder ohne DPT), ignoriert`);
+      return;
+    }
+    const value = message.toString('utf8').trim();
+    publishToKnx(addr, dpt, value, 'mqtt->knx');
+  }
 
   // KNX-Zustand -> Loxone. Payload-Format: config.yaml erzwingt
   // outgoingMqttMessage.type=bytes (das Binary verweigert den Start mit
@@ -246,7 +286,8 @@ async function main() {
   // der rohe KNX-Bytestring (kein JSON, kein base64), die Gruppenadresse
   // steckt stattdessen im Topic-Pfad, deshalb hier ueber topicToAddr statt
   // ueber ein JSON-Feld aufgeloest.
-  mqttClient.on('message', (topic, message) => {
+  mqttClient.on('message', (topic, message, packet) => {
+    if (topic.startsWith(writePrefix)) { handleMqttWrite(topic, message, packet); return; }
     const addr = topicToAddr.get(topic);
     const target = addr && inputMap.get(addr);
     if (!target) { console.warn(`[knx] Keine Zuordnung fuer Topic "${topic}", ignoriert`); return; }
@@ -348,7 +389,7 @@ async function main() {
   // string-formatierten Wert statt Rohbytes erwartet) mit dem rohen
   // KNX-Byte-Buffer direkt als Payload — konsistent mit
   // outgoingMqttMessage.type=bytes auf der Lese-Seite (siehe config.yaml.default).
-  function publishToKnx(addr, dpt, value) {
+  function publishToKnx(addr, dpt, value, source = 'lox->knx') {
     if (!mqttClient.connected) { console.error(`[knx] Keine MQTT-Verbindung — Schreibbefehl für ${addr} verworfen`); return; }
     const buf = dptCodec.encode(dpt, value);
     if (buf === null) {
@@ -362,7 +403,7 @@ async function main() {
     const topic = joinTopic(topicPrefix, addr) + '/write-bytes';
     mqttClient.publish(topic, buf, { qos: (knxCfg.mqtt && knxCfg.mqtt.qos) || 0, retain: false });
     if (logLevel.enabled(logLevel.DEBUG)) console.log(`[knx] ${topic} <- ${value} (dpt ${dpt})`);
-    recordActivity('lox->knx', addr, dpt, value);
+    recordActivity(source, addr, dpt, value);
   }
 
   function handleLoxUpdate(uuid, value) {

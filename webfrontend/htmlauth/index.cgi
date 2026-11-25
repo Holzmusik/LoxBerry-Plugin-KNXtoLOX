@@ -121,6 +121,7 @@ print <<'HTML';
 .kx-app .dir-badge.knx-lox { background: rgba(109,172,32,.16); color: #8fd13f; }
 .kx-app .dir-badge.lox-knx { background: rgba(202,138,4,.16); color: #e0ad1f; }
 .kx-app .dir-badge.zeitgeber { background: rgba(59,130,246,.16); color: #6ea8fe; }
+.kx-app .dir-badge.mqtt-knx { background: rgba(168,85,247,.16); color: #c084fc; }
 
 .kx-app .badge { font-size: 11px; padding: 3px 8px; border-radius: 20px; background: var(--surf2); color: var(--txt2); border: 1px solid var(--brd); }
 .kx-app .status-bar { display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: var(--surf2); border-radius: 8px; margin-bottom: 16px; font-size: 13px; }
@@ -877,6 +878,7 @@ function renderActivity(events) {
     'knx->lox':  { cls: 'knx-lox',  txt: 'KNX -&gt; Lox' },
     'lox->knx':  { cls: 'lox-knx',  txt: 'Lox -&gt; KNX' },
     'zeitgeber': { cls: 'zeitgeber', txt: 'Zeitgeber -&gt; KNX' },
+    'mqtt->knx': { cls: 'mqtt-knx', txt: 'MQTT -&gt; KNX' },
   };
   tbody.innerHTML = events.map(ev => {
     // ev.ts kommt von bin/bridge.js bereits als lokale "YYYY-MM-DD HH:MM:SS"-
