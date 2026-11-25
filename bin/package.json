@@ -4,7 +4,8 @@
   "description": "MQTT <-> Loxone Bruecke fuer KNXtoLOX (KNX-Bus-Seite uebernimmt das Go-Binary knx-mqtt)",
   "main": "bridge.js",
   "scripts": {
-    "start": "node bridge.js"
+    "start": "node bridge.js",
+    "test": "node --test ../test/"
   },
   "dependencies": {
     "mqtt": "^5.3.4",

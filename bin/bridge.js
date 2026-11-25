@@ -291,10 +291,13 @@ async function main() {
       console.error(`[cmd] Keine Loxone-Verbindung — Befehl verworfen: ${key} = ${value}`);
       return;
     }
-    if (logLevel.enabled(logLevel.DEBUG)) console.log(`[cmd] jdev/sps/io/${key}/${value}`);
+    // URL-kodiert: Texte (DPT 16) koennen Leerzeichen, "/" oder Umlaute
+    // enthalten, die den Befehlspfad sonst zerbrechen. Zahlen bleiben gleich.
+    const cmd = `jdev/sps/io/${key}/${encodeURIComponent(String(value))}`;
+    if (logLevel.enabled(logLevel.DEBUG)) console.log(`[cmd] ${cmd}`);
     try {
       pendingCommands.set(key, Date.now());
-      loxApi.send_command(`jdev/sps/io/${key}/${value}`);
+      loxApi.send_command(cmd);
     } catch (e) {
       pendingCommands.delete(key);
       console.error(`[cmd] send_command fehlgeschlagen für ${key}:`, e && e.message || e);
@@ -310,6 +313,10 @@ async function main() {
   function publishToKnx(addr, dpt, value) {
     if (!mqttClient.connected) { console.error(`[knx] Keine MQTT-Verbindung — Schreibbefehl für ${addr} verworfen`); return; }
     const buf = dptCodec.encode(dpt, value);
+    if (buf === null) {
+      console.warn(`[knx] ${addr}: Wert "${value}" ist kein gueltiger DPT-${dpt}-Wert, nicht gesendet`);
+      return;
+    }
     const topic = joinTopic(topicPrefix, addr) + '/write-bytes';
     mqttClient.publish(topic, buf, { qos: (knxCfg.mqtt && knxCfg.mqtt.qos) || 0, retain: false });
     if (logLevel.enabled(logLevel.DEBUG)) console.log(`[knx] ${topic} <- ${value} (dpt ${dpt})`);
