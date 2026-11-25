@@ -102,3 +102,15 @@ test('Punkt 2: Rate wird begrenzt', () => {
   assert.equal(new L.ReadQueue(1000, () => {}).intervalMs, 20, 'max 50/s');
   assert.equal(new L.ReadQueue(0, () => {}).intervalMs, 100, 'Standard 10/s');
 });
+
+test('Punkt 8: Gesamtzustand', () => {
+  const base = { mqtt: true, lox: true, knxService: 'active', lastKnxRx: 1000, now: 60000, knxTimeoutSec: 300 };
+  assert.deepEqual(L.assessHealth(base), { ok: true, reasons: [] });
+  assert.equal(L.assessHealth({ ...base, mqtt: false }).ok, false);
+  assert.equal(L.assessHealth({ ...base, lox: false }).ok, false);
+  assert.equal(L.assessHealth({ ...base, knxService: 'failed' }).ok, false);
+  assert.equal(L.assessHealth({ ...base, knxService: undefined }).ok, true, 'Dienststatus unbekannt -> nicht gewertet');
+  assert.equal(L.assessHealth({ ...base, lastKnxRx: 0 }).ok, false, 'noch nie etwas empfangen');
+  assert.equal(L.assessHealth({ ...base, now: 1000 + 301000 }).ok, false, 'Timeout');
+  assert.equal(L.assessHealth({ ...base, lastKnxRx: 0, knxTimeoutSec: 0 }).ok, true, 'Timeout-Pruefung aus');
+});

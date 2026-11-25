@@ -5,7 +5,8 @@ const path = require('path');
 const yaml = require('js-yaml');
 const mqtt = require('mqtt');
 const dptCodec = require('./dptCodec');
-const { toBool, toInterval, LoxChangeFilter, EchoGuard, ReadQueue } = require('./bridgeLogic');
+const { toBool, toInterval, LoxChangeFilter, EchoGuard, ReadQueue, assessHealth } = require('./bridgeLogic');
+const { execFile } = require('child_process');
 const loxberrylog = require('./loxberrylog');
 
 // ── Pfade: LoxBerry vs. lokale Entwicklung ─────────────────
@@ -45,6 +46,8 @@ const PATHS = {
   // werden echte Aenderungen waehrend der Auszeit erkannt), aber KEINEN
   // Reboot - nach einem Reboot gibt es keine veralteten Werte.
   loxValues: '/dev/shm/knxmqtt-loxvalues.json',
+  // Gesamtzustand fuer die Status-Seite (Punkt 8), von api.cgi gelesen.
+  health: '/dev/shm/knxmqtt-health.json',
 };
 
 // Live-Aktivitaet fuer die Status-Seite: Ringpuffer der letzten Ereignisse
@@ -65,7 +68,9 @@ let addrLabels = new Map();
 // beide Spalten zeigten dieselbe Sekunde, aber mit 2h Differenz.
 function pad2(n) { return String(n).padStart(2, '0'); }
 function localTimestamp() {
-  const d = new Date();
+  return localTimestampOf(new Date());
+}
+function localTimestampOf(d) {
   return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' +
     pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
 }
@@ -219,6 +224,9 @@ async function main() {
   // der Wert ist bekannt, er soll nur nicht beim Connect ausgeloest werden.
   const lastOut = new Map(); // addr -> value
 
+  // Punkt 8: Zeitpunkt des letzten Telegramms vom Bus (beliebige abonnierte GA)
+  let lastKnxRx = 0;
+
   // ── MQTT Client ────────────────────────────────────────────
   const mqttClient = mqtt.connect({
     host: mqttConn.host,
@@ -329,6 +337,7 @@ async function main() {
     const addr = topicToAddr.get(topic);
     const target = addr && inputMap.get(addr);
     if (!target) { console.warn(`[knx] Keine Zuordnung fuer Topic "${topic}", ignoriert`); return; }
+    lastKnxRx = Date.now();
 
     // Leerer Payload = GroupValueRead vom Bus (knx-mqtt veroeffentlicht Reads
     // entgegen README auf dem normalen Werte-Topic, nicht auf ".../read") -
@@ -516,6 +525,64 @@ async function main() {
     }, (60 - new Date().getSeconds()) * 1000);
     console.log(`[zeitgeber] aktiv (Uhrzeit=${timeAddr || '-'}, Datum=${dateAddr || '-'})`);
   }
+
+  // ── Punkt 8: Heartbeat / Ausfallerkennung ────────────────────────────────
+  // Alle heartbeat_interval Sekunden (Standard 30) wird der Gesamtzustand
+  // geprueft und nach /dev/shm geschrieben (Status-Seite). Ist zusaetzlich
+  // heartbeat_uuid gesetzt (virtueller Eingang), zaehlt die Bridge dort einen
+  // Wert hoch - aber NUR solange alles ok ist. Bleibt der Zaehler stehen,
+  // loest Loxones Watchdog-Logik aus. knx_timeout (Standard 300 s, 0 = aus):
+  // so lange darf kein Telegramm vom Bus kommen, bevor KNX als ausgefallen
+  // gilt - dafuer sollte mindestens eine GA mit read_interval laufen.
+  const hbUuid = String(cfg.heartbeat_uuid || '').trim().toLowerCase();
+  const hbInterval = toInterval(cfg.heartbeat_interval === undefined ? 30 : cfg.heartbeat_interval, 5) || 30;
+  const knxTimeoutSec = cfg.knx_timeout === undefined ? 300 : Math.max(0, Number(cfg.knx_timeout) || 0);
+  let hbCounter = 0;
+  let knxServiceState; // undefined = noch nicht abgefragt / nicht abfragbar
+  function pollKnxService() {
+    execFile('systemctl', ['is-active', 'knxmqtt.service'], { timeout: 5000 }, (err, stdout) => {
+      const out = String(stdout || '').trim();
+      // Ohne systemd (lokale Entwicklung) nicht werten
+      knxServiceState = out || (err && err.code === 'ENOENT' ? undefined : 'unbekannt');
+    });
+  }
+  function heartbeatTick() {
+    pollKnxService();
+    const health = assessHealth({
+      mqtt: mqttClient.connected,
+      lox: loxAuthorized,
+      knxService: knxServiceState,
+      lastKnxRx,
+      now: Date.now(),
+      knxTimeoutSec,
+    });
+    if (health.ok && hbUuid) {
+      hbCounter = hbCounter >= 99999 ? 1 : hbCounter + 1;
+      sendToLoxone(hbUuid, hbCounter);
+    } else if (!health.ok) {
+      console.warn(`[heartbeat] gestoert: ${health.reasons.join(', ')}`);
+    }
+    try {
+      fs.writeFileSync(PATHS.health, JSON.stringify({
+        ts: localTimestamp(),
+        ok: health.ok,
+        reasons: health.reasons,
+        mqtt: mqttClient.connected,
+        lox: loxAuthorized,
+        knx_service: knxServiceState || null,
+        last_knx_rx: lastKnxRx ? localTimestampOf(new Date(lastKnxRx)) : null,
+        knx_timeout: knxTimeoutSec,
+        heartbeat_uuid: hbUuid || null,
+        heartbeat_counter: hbCounter,
+      }));
+    } catch (e) {
+      console.warn('[heartbeat] Konnte health.json nicht schreiben:', e.message);
+    }
+  }
+  pollKnxService();
+  setInterval(heartbeatTick, hbInterval * 1000);
+  console.log(`[heartbeat] Pruefung alle ${hbInterval} s, KNX-Timeout ${knxTimeoutSec || 'aus'}` +
+    (hbUuid ? `, Zaehler -> ${hbUuid}` : ' (kein heartbeat_uuid)'));
 
   console.log(`[lox] Verbinde mit ${loxConn.host}:${loxConn.port || 80}…`);
   loxApi.connect();

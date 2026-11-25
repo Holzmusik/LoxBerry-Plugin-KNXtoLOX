@@ -659,6 +659,14 @@ elsif ($action eq 'engine_status') {
 elsif ($action eq 'bridge_status') {
     my $s = svc_status($BRIDGE_SERVICE);
     $s->{log} = tail_log($bridgelogfile, 100);
+    # Gesamtzustand (Heartbeat), von bin/bridge.js nach /dev/shm geschrieben
+    if (open(my $hfh, '<', '/dev/shm/knxmqtt-health.json')) {
+        local $/;
+        my $txt = <$hfh>;
+        close $hfh;
+        my $h = eval { JSON::PP->new->utf8->decode($txt) };
+        $s->{health} = $h if $h;
+    }
     out($s);
 }
 elsif ($action eq 'bridge_restart') {

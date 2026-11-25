@@ -134,4 +134,25 @@ class ReadQueue {
   }
 }
 
-module.exports = { toBool, toInterval, sameValue, LoxChangeFilter, EchoGuard, ReadQueue };
+// ── Punkt 8: Gesamtzustand fuer Heartbeat/Ausfallerkennung ─────────────────
+// knx-mqtt meldet seinen KNX-Verbindungszustand nirgends (kein Status-Topic,
+// bei KNX-Abbruch laeuft der Dienst weiter und loggt nur). "Dienst aktiv"
+// allein beweist also nichts - deshalb zusaetzlich: in den letzten
+// knxTimeoutSec Sekunden muss mindestens ein Telegramm vom Bus angekommen
+// sein (z.B. Antworten auf zyklische Leseanfragen). knxTimeoutSec 0 = diese
+// Pruefung aus.
+function assessHealth({ mqtt, lox, knxService, lastKnxRx, now, knxTimeoutSec }) {
+  const reasons = [];
+  if (!mqtt) reasons.push('MQTT getrennt');
+  if (!lox) reasons.push('Loxone nicht verbunden');
+  if (knxService !== undefined && knxService !== 'active') reasons.push(`knx-mqtt ${knxService || 'unbekannt'}`);
+  if (knxTimeoutSec > 0) {
+    if (!lastKnxRx) reasons.push('noch kein KNX-Telegramm empfangen');
+    else if (now - lastKnxRx > knxTimeoutSec * 1000) {
+      reasons.push(`seit ${Math.round((now - lastKnxRx) / 1000)} s kein KNX-Telegramm`);
+    }
+  }
+  return { ok: reasons.length === 0, reasons };
+}
+
+module.exports = { toBool, toInterval, sameValue, LoxChangeFilter, EchoGuard, ReadQueue, assessHealth };
