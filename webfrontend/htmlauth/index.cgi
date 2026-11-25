@@ -180,7 +180,7 @@ print <<'HTML';
 <aside class="sidebar">
   <div class="sidebar-logo">KNXtoLOX<span>KNX &lt;-&gt; Loxone Bruecke</span></div>
   <nav class="nav">
-    <div class="nav-item active" data-page="overview">Uebersicht</div>
+    <div class="nav-item active" data-page="overview">Übersicht</div>
     <div class="nav-item" data-page="bus">Bus-Verbindung</div>
     <div class="nav-item" data-page="mqtt">MQTT</div>
     <div class="nav-item" data-page="groupaddresses">Gruppenadressen</div>
@@ -504,7 +504,7 @@ let GA_ROWS = [];
 // Neuinstallation tatsaechlich der neue Stand geladen wurde - haeufigste
 // Fehlerquelle beim Debuggen "aus der Ferne" ist sonst der Browser-Cache
 // oder ein vergessener Reinstall.
-const UI_BUILD = '2026-11-25-2';
+const UI_BUILD = '2026-11-25-3';
 console.log('[KNXtoLOX] index.cgi UI_BUILD=' + UI_BUILD);
 
 // Client-seitiger Mitschnitt jeder api()/uploadForm()-Anfrage - sichtbar auf
@@ -984,7 +984,7 @@ function applyHealth(h, bridgeRunning) {
   if (t0) t0.textContent = 'Gesamtzustand: ' + txt;
   if (t1) t1.textContent = txt + (h && h.ts ? ' (Stand ' + h.ts + ')' : '');
   if (det) det.textContent = h ? (
-    'Letztes KNX-Telegramm: ' + (h.last_knx_rx || 'noch keines') +
+    'Letztes KNX-Telegramm: ' + (h.last_knx_rx ? h.last_knx_rx + (h.last_knx_addr ? ' von ' + h.last_knx_addr : '') : 'noch keines') +
     ' | Pruefadresse: ' + (h.probe_addr || 'keine') +
     ' | KNX-Timeout: ' + (h.knx_timeout ? h.knx_timeout + ' s' : 'aus') +
     ' | Zaehler: ' + (h.heartbeat_uuid ? h.heartbeat_counter : 'kein virtueller Eingang konfiguriert')

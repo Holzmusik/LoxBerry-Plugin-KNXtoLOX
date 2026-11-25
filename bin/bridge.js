@@ -226,8 +226,14 @@ async function main() {
   // der Wert ist bekannt, er soll nur nicht beim Connect ausgeloest werden.
   const lastOut = new Map(); // addr -> value
 
-  // Punkt 8: Zeitpunkt des letzten Telegramms vom Bus (beliebige GA)
+  // Punkt 8: Zeitpunkt + Adresse des letzten Telegramms vom Bus (beliebige GA)
   let lastKnxRx = 0;
+  let lastKnxAddr = '';
+  // Eigene Schreibbefehle der letzten 2 s (Adresse + Bytes). Meldet das
+  // Gateway/knx-mqtt ein selbst gesendetes Telegramm zurueck, darf das NICHT
+  // als Lebenszeichen zaehlen - sonst stuende der Heartbeat auf "ok", obwohl
+  // ausser der Bridge niemand am Bus antwortet (z.B. Zeitgeber jede Minute).
+  const ownWrites = new EchoGuard(2000);
   // Punkt 8: Pruefadresse - eine GA, deren Geraet auf Leseanfragen antwortet
   // (R-Flag, z.B. ein Aktor-Status). Die Bridge liest sie in jedem
   // Heartbeat-Intervall; die Antwort beweist den ganzen Weg LoxBerry ->
@@ -349,7 +355,12 @@ async function main() {
     if (topic.startsWith(writePrefix)) { handleMqttWrite(topic, message, packet); return; }
     const addr = valueTopicAddr(topicPrefix, topic);
     if (!addr) return;
-    lastKnxRx = Date.now(); // jedes Bus-Telegramm = Lebenszeichen (Punkt 8)
+    if (ownWrites.isEcho(addr, message)) {
+      if (logLevel.enabled(logLevel.DEBUG)) console.log(`[knx] ${addr}: Echo eines eigenen Telegramms, zaehlt nicht als Lebenszeichen`);
+    } else {
+      lastKnxRx = Date.now(); // jedes fremde Bus-Telegramm = Lebenszeichen (Punkt 8)
+      lastKnxAddr = addr;
+    }
     const target = inputMap.get(addr);
     if (!target) return; // nicht in der Tabelle -> nur Lebenszeichen
 
@@ -464,6 +475,7 @@ async function main() {
     }
     const topic = joinTopic(topicPrefix, addr) + '/write-bytes';
     mqttClient.publish(topic, buf, { qos: (knxCfg.mqtt && knxCfg.mqtt.qos) || 0, retain: false });
+    ownWrites.noteBusValue(addr, buf);
     if (logLevel.enabled(logLevel.DEBUG)) console.log(`[knx] ${topic} <- ${value} (dpt ${dpt})`);
     recordActivity(source, addr, dpt, value);
   }
@@ -522,11 +534,15 @@ async function main() {
       if (!mqttClient.connected) return;
       const now = new Date();
       if (timeAddr) {
-        mqttClient.publish(joinTopic(topicPrefix, timeAddr) + '/write-bytes', dptCodec.encodeTimeOfDay(now), { qos: 0, retain: false });
+        const tbuf = dptCodec.encodeTimeOfDay(now);
+        mqttClient.publish(joinTopic(topicPrefix, timeAddr) + '/write-bytes', tbuf, { qos: 0, retain: false });
+        ownWrites.noteBusValue(timeAddr, tbuf);
         recordActivity('zeitgeber', timeAddr, '10.001', now.toLocaleTimeString('de-DE'), 'Systemzeit');
       }
       if (dateAddr) {
-        mqttClient.publish(joinTopic(topicPrefix, dateAddr) + '/write-bytes', dptCodec.encodeDate(now), { qos: 0, retain: false });
+        const dbuf = dptCodec.encodeDate(now);
+        mqttClient.publish(joinTopic(topicPrefix, dateAddr) + '/write-bytes', dbuf, { qos: 0, retain: false });
+        ownWrites.noteBusValue(dateAddr, dbuf);
         recordActivity('zeitgeber', dateAddr, '11.001', now.toLocaleDateString('de-DE'), 'Systemdatum');
       }
     }
@@ -589,6 +605,7 @@ async function main() {
         lox: loxAuthorized,
         knx_service: knxServiceState || null,
         last_knx_rx: lastKnxRx ? localTimestampOf(new Date(lastKnxRx)) : null,
+        last_knx_addr: lastKnxAddr || null,
         knx_timeout: knxTimeoutSec,
         probe_addr: probeAddr || null,
         heartbeat_uuid: hbUuid || null,
