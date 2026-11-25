@@ -208,6 +208,14 @@ my %SETTINGS_DEFAULTS = (
     client_id    => 'loxberry-knxmqtt',
     time_addr    => '', # KNX-Zeitgeber (DPT 10.001) - leer = deaktiviert, siehe bin/bridge.js
     date_addr    => '', # KNX-Zeitgeber (DPT 11.001) - leer = deaktiviert, siehe bin/bridge.js
+    # Verhalten Loxone <-> KNX, alle von bin/bridge.js gelesen (dort dokumentiert)
+    mqtt_write_prefix  => 'knxlox/write/', # Punkt 6: <prefix><ga> = Klartextwert -> KNX
+    read_on_connect    => JSON::PP::true,  # Punkt 2: Leseanfragen nach jedem Loxone-Connect
+    read_rate          => 10,              # Punkt 2: max. Leseanfragen pro Sekunde
+    echo_window_ms     => 1000,            # Punkt 7: 0 = Echo-Unterdrueckung aus
+    heartbeat_uuid     => '',              # Punkt 8: virtueller Eingang fuer den Zaehler, leer = aus
+    heartbeat_interval => 30,              # Punkt 8: Sekunden
+    knx_timeout        => 300,             # Punkt 8: Sekunden ohne Bus-Telegramm bis "gestoert", 0 = aus
     knxd         => {
         device => '/dev/ttyAMA0', own_addr => '0.0.1', pool_start => '0.0.2',
         pool_size => 10, cache => JSON::PP::true, loglevel => 'error', send_delay => 0,
@@ -397,7 +405,10 @@ sub svc_status {
 # Bleibt bei YAML::Tiny (eigenes Format, nur von unserem Perl-Code und der
 # Node-Bridge via js-yaml gelesen — kein Go-Struct-Binding-Risiko wie bei
 # config.yaml).
-my @GA_FIELDS = qw(addr dpt label lox_input_uuid lox_input_name lox_output_uuid lox_output_name);
+# Neue Felder nur ANGEHAENGT, damit CSV-Dateien aelterer Versionen (7 Spalten)
+# unveraendert importierbar bleiben.
+my @GA_FIELDS = qw(addr dpt label lox_input_uuid lox_input_name lox_output_uuid lox_output_name
+                   read_interval cyclic send_on_connect);
 
 sub load_ga_rows {
     return [] unless -f $gafile;
@@ -464,7 +475,14 @@ if ($action eq 'config') {
             run_capture('sudo', 'systemctl', 'stop', $KNXD_SERVICE);
         }
 
-        applog('Konfiguration gespeichert (bus_mode=' . ($settings->{bus_mode} // 'gira') . ')');
+        # Beide Dienste lesen ihre Konfiguration nur beim Start: knx-mqtt die
+        # config.yaml, die Bridge die bridge.json (Verhalten, Heartbeat,
+        # Zeitgeber) - ohne Neustart wirkt eine Aenderung sonst erst nach dem
+        # naechsten Reboot.
+        run_capture('sudo', 'systemctl', 'restart', $KNXMQTT_SERVICE);
+        run_capture('sudo', 'systemctl', 'restart', $BRIDGE_SERVICE);
+
+        applog('Konfiguration gespeichert (bus_mode=' . ($settings->{bus_mode} // 'gira') . '), Dienste neu gestartet');
         out({ ok => JSON::PP::true });
     } else {
         my $settings = load_settings();
@@ -599,6 +617,10 @@ elsif ($action eq 'import_csv') {
                 lox_input_uuid => $f[3] // '', lox_input_name => $f[4] // '',
                 lox_output_uuid => $f[5] // '', lox_output_name => $f[6] // '',
             };
+            # Optionale Felder nur setzen, wenn vorhanden (alte CSVs haben sie nicht)
+            $rows->[-1]{read_interval}   = $f[7] if defined $f[7] && length $f[7];
+            $rows->[-1]{cyclic}          = $f[8] if defined $f[8] && length $f[8];
+            $rows->[-1]{send_on_connect} = $f[9] if defined $f[9] && length $f[9];
             $count++;
         }
     }

@@ -117,6 +117,10 @@ print <<'HTML';
 .kx-app table.ga-table input, .kx-app table.ga-table select { width: 100%; padding: 6px 8px; font-size: 13px; }
 .kx-app table.ga-table .ga-del { cursor: pointer; color: var(--danger); font-size: 16px; }
 .kx-app table.ga-table td.mono { font-variant-numeric: tabular-nums; color: var(--txt2) !important; white-space: nowrap; }
+.kx-app table.ga-table .ga-opts { display: grid; grid-template-columns: auto 64px; gap: 3px 6px; align-items: center; font-size: 11px; color: var(--txt2); white-space: nowrap; }
+.kx-app table.ga-table .ga-opts input[type=number] { padding: 4px 6px; font-size: 12px; }
+.kx-app table.ga-table .ga-opts input[type=checkbox] { width: auto; justify-self: start; }
+.kx-app .health-reasons { margin-top: 6px; font-size: 13px; color: var(--danger); }
 .kx-app .dir-badge { display: inline-block; padding: 2px 9px; border-radius: 20px; font-size: 11px; font-weight: 600; white-space: nowrap; }
 .kx-app .dir-badge.knx-lox { background: rgba(109,172,32,.16); color: #8fd13f; }
 .kx-app .dir-badge.lox-knx { background: rgba(202,138,4,.16); color: #e0ad1f; }
@@ -193,6 +197,7 @@ print <<'HTML';
       <div class="card-title">Dienste</div>
       <div class="status-bar"><span class="status-dot" id="dot-engine"></span><span id="txt-engine">knx-mqtt (KNX-Bus &lt;-&gt; MQTT) ...</span></div>
       <div class="status-bar"><span class="status-dot" id="dot-bridge"></span><span id="txt-bridge">Node-Bridge (MQTT &lt;-&gt; Loxone) ...</span></div>
+      <div class="status-bar"><span class="status-dot" id="dot-health0"></span><span id="txt-health0">Gesamtzustand ...</span></div>
     </div>
     <div class="card">
       <div class="card-title">Gruppenadressen</div>
@@ -303,6 +308,42 @@ print <<'HTML';
         <select id="loxone_msno" data-role="none"></select>
       </div>
     </div>
+
+    <div class="card">
+      <div class="card-title">Verhalten Loxone &lt;-&gt; KNX</div>
+      <div class="field">
+        <label>Schreib-Topic fuer Loxone (MQTT -&gt; KNX)</label>
+        <input type="text" id="mqtt_write_prefix" data-role="none" placeholder="knxlox/write/">
+        <div class="hint">Loxone sendet ueber einen virtuellen Ausgang und das LoxBerry-MQTT-Gateway
+          z.B. <code>publish knxlox/write/1/2/3 &lt;v&gt;</code> - der DPT kommt aus der
+          Gruppenadressen-Tabelle. Nur Adressen aus der Tabelle werden angenommen, Retain wird ignoriert.
+          Als Platzhalter fuer den Wert nur <code>&lt;v&gt;</code> verwenden.</div>
+      </div>
+      <div class="checkfield"><div class="toggle" id="read_on_connect" onclick="toggleSwitch('read_on_connect')"></div><label onclick="toggleSwitch('read_on_connect')">Nach jeder Loxone-Verbindung alle Eingangs-Adressen vom Bus lesen</label></div>
+      <div class="row">
+        <div class="field"><label>Leseanfragen pro Sekunde (max.)</label><input type="number" id="read_rate" data-role="none" min="1" max="50" placeholder="10"></div>
+        <div class="field"><label>Echo-Unterdrueckung (ms, 0 = aus)</label><input type="number" id="echo_window_ms" data-role="none" min="0" placeholder="1000"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Heartbeat / Ausfallerkennung</div>
+      <div class="hint" style="margin-bottom:14px">
+        Solange MQTT, Loxone und knx-mqtt laufen und innerhalb des KNX-Timeouts ein Telegramm vom Bus
+        kam, zaehlt die Bridge auf dem angegebenen virtuellen Eingang hoch. Bleibt der Wert stehen,
+        ist die KNX-Anbindung gestoert (in Loxone z.B. per Watchdog-Logik ueberwachen). Damit der
+        Timeout greifen kann, sollte mindestens eine Gruppenadresse mit "Lesen alle ... s" laufen.
+      </div>
+      <div class="field">
+        <label>Virtueller Eingang (UUID, leer = kein Zaehler)</label>
+        <input type="text" id="heartbeat_uuid" data-role="none" placeholder="Loxone-UUID des virtuellen Eingangs">
+      </div>
+      <div class="row">
+        <div class="field"><label>Intervall (s)</label><input type="number" id="heartbeat_interval" data-role="none" min="5" placeholder="30"></div>
+        <div class="field"><label>KNX-Timeout (s, 0 = aus)</label><input type="number" id="knx_timeout" data-role="none" min="0" placeholder="300"></div>
+      </div>
+    </div>
+
     <div class="btn-group">
       <button class="btn btn-primary" onclick="saveConfig()">Speichern</button>
     </div>
@@ -334,6 +375,10 @@ print <<'HTML';
         Typen, ist aber keine feste Auswahl: jeder in der ETS vorkommende
         Datenpunkttyp kann eingetragen werden, auch wenn er nicht in der
         Liste steht.
+        <br><b>Optionen:</b> "Lesen" fragt die Adresse zyklisch vom Bus ab (Eingang, min. 10 s),
+        "Zyklisch" sendet den letzten Loxone-Wert periodisch erneut auf den Bus (Ausgang, min. 10 s),
+        "Bei Connect" schreibt den Loxone-Wert auch direkt nach jeder (Re-)Verbindung - standardmaessig
+        wird nach einem Neustart nichts gesendet, nur echte Aenderungen.
       </div>
       <!-- Freitext+Datalist statt fester <select>-Optionen: reale ETS-Projekte
            nutzen deutlich mehr DPT-Subtypen als eine von uns gepflegte Liste
@@ -347,15 +392,18 @@ print <<'HTML';
         <option value="7.001"><option value="8.001">
         <option value="9.001"><option value="9.004"><option value="9.007"><option value="9.008">
         <option value="12.001"><option value="13.001"><option value="13.010">
+        <option value="10.001"><option value="11.001">
         <option value="14.001">
+        <option value="16.000"><option value="16.001">
         <option value="17.001"><option value="18.001"><option value="20.102">
+        <option value="232.600">
         <option value="raw">
       </datalist>
       <div style="overflow-x:auto">
         <table class="ga-table">
           <thead><tr>
             <th>Gruppenadresse</th><th>DPT</th><th>Bezeichnung</th>
-            <th>Loxone-Eingang (KNX-&gt;Lox)</th><th>Loxone-Ausgang (Lox-&gt;KNX)</th><th></th>
+            <th>Loxone-Eingang (KNX-&gt;Lox)</th><th>Loxone-Ausgang (Lox-&gt;KNX)</th><th>Optionen</th><th></th>
           </tr></thead>
           <tbody id="ga-tbody"></tbody>
         </table>
@@ -369,6 +417,12 @@ print <<'HTML';
 
   <section id="page-status" class="page">
     <h2>Status</h2>
+    <div class="card">
+      <div class="card-title">Gesamtzustand (Heartbeat)</div>
+      <div class="status-bar"><span class="status-dot" id="dot-health"></span><span id="txt-health">...</span></div>
+      <div class="hint" id="health-detail"></div>
+      <div class="health-reasons" id="health-reasons"></div>
+    </div>
     <div class="card">
       <div class="card-title">Live-Aktivitaet</div>
       <div class="hint">Letzte 50 Gruppenadressen-Ereignisse in beide Richtungen (nur konfigurierte Adressen) - aeltere Eintraege fallen automatisch raus, die Liste waechst also nie unbegrenzt.</div>
@@ -443,7 +497,7 @@ let GA_ROWS = [];
 // Neuinstallation tatsaechlich der neue Stand geladen wurde - haeufigste
 // Fehlerquelle beim Debuggen "aus der Ferne" ist sonst der Browser-Cache
 // oder ein vergessener Reinstall.
-const UI_BUILD = '2026-07-24-3';
+const UI_BUILD = '2026-11-25-1';
 console.log('[KNXtoLOX] index.cgi UI_BUILD=' + UI_BUILD);
 
 // Client-seitiger Mitschnitt jeder api()/uploadForm()-Anfrage - sichtbar auf
@@ -518,6 +572,14 @@ function toggleSwitch(id) { setToggled(id, !isToggled(id)); }
 function isToggled(id) { const el = document.getElementById(id); return el && el.dataset.checked === 'true'; }
 function setToggled(id, val) { const el = document.getElementById(id); if (el) el.dataset.checked = val ? 'true' : 'false'; }
 
+// Zahl aus einem Eingabefeld; leer -> Standardwert, 0 bleibt 0
+function numField(id, def) {
+  const v = document.getElementById(id).value.trim();
+  if (v === '') return def;
+  const n = parseInt(v, 10);
+  return Number.isFinite(n) ? n : def;
+}
+
 function currentConfigForm() {
   return {
     bus_mode: document.getElementById('bus_mode').value,
@@ -529,6 +591,13 @@ function currentConfigForm() {
     time_addr: document.getElementById('time_addr').value.trim(),
     date_addr: document.getElementById('date_addr').value.trim(),
     loxone_msno: parseInt(document.getElementById('loxone_msno').value || '1', 10),
+    mqtt_write_prefix: document.getElementById('mqtt_write_prefix').value.trim() || 'knxlox/write/',
+    read_on_connect: isToggled('read_on_connect'),
+    read_rate: numField('read_rate', 10),
+    echo_window_ms: numField('echo_window_ms', 1000),
+    heartbeat_uuid: document.getElementById('heartbeat_uuid').value.trim(),
+    heartbeat_interval: numField('heartbeat_interval', 30),
+    knx_timeout: numField('knx_timeout', 300),
     knxd: {
       device: document.getElementById('knxd_device').value,
       own_addr: document.getElementById('knxd_own_addr').value,
@@ -556,6 +625,14 @@ function fillConfigForm(c) {
   document.getElementById('client_id').value = c.client_id || 'loxberry-knxmqtt';
   document.getElementById('time_addr').value = c.time_addr || '';
   document.getElementById('date_addr').value = c.date_addr || '';
+  document.getElementById('mqtt_write_prefix').value = c.mqtt_write_prefix || 'knxlox/write/';
+  setToggled('read_on_connect', c.read_on_connect === undefined ? true : !!c.read_on_connect);
+  const numOr = (v, d) => (v === undefined || v === null || v === '') ? d : v;
+  document.getElementById('read_rate').value = numOr(c.read_rate, 10);
+  document.getElementById('echo_window_ms').value = numOr(c.echo_window_ms, 1000);
+  document.getElementById('heartbeat_uuid').value = c.heartbeat_uuid || '';
+  document.getElementById('heartbeat_interval').value = numOr(c.heartbeat_interval, 30);
+  document.getElementById('knx_timeout').value = numOr(c.knx_timeout, 300);
   const k = c.knxd || {};
   document.getElementById('knxd_own_addr').value = k.own_addr || '';
   document.getElementById('knxd_pool_start').value = k.pool_start || '';
@@ -587,7 +664,7 @@ async function loadConfig() {
 async function saveConfig() {
   const body = currentConfigForm();
   const r = await api('config', { method: 'POST', body });
-  toast(r.ok ? 'Gespeichert' : (r.error || 'Fehler'), !!r.ok);
+  toast(r.ok ? 'Gespeichert - Dienste werden neu gestartet ...' : (r.error || 'Fehler'), !!r.ok);
 }
 
 async function testKnx() {
@@ -627,6 +704,14 @@ async function loadKnxdDevices() {
 }
 
 // ── Gruppenadressen-Tabelle ──────────────────────────────────
+// Gleiche Wahr-Werte wie bin/bridgeLogic.js toBool()
+function isTrue(v) {
+  if (v === true) return true;
+  if (typeof v === 'number') return v !== 0;
+  return ['1', 'true', 'yes', 'ja', 'on', 'ein', 'x'].includes(String(v == null ? '' : v).trim().toLowerCase());
+}
+const GA_OPTIONAL_FIELDS = ['read_interval', 'cyclic', 'send_on_connect'];
+
 function gaRowHtml(row, idx) {
   row = row || {};
   const f = (k) => (row[k] || '').toString().replace(/"/g, '&quot;');
@@ -644,6 +729,14 @@ function gaRowHtml(row, idx) {
     '<td><input type="text" data-role="none" data-f="label" value="' + f('label') + '"></td>' +
     uuidCell('lox_input_uuid', 'lox_input_name') +
     uuidCell('lox_output_uuid', 'lox_output_name') +
+    '<td><div class="ga-opts">' +
+      '<span title="Zyklische Leseanfrage (Sekunden, leer = aus)">Lesen alle s</span>' +
+      '<input type="number" min="0" data-role="none" data-f="read_interval" value="' + f('read_interval') + '">' +
+      '<span title="Letzten Loxone-Wert zyklisch senden (Sekunden, leer = aus)">Zyklisch alle s</span>' +
+      '<input type="number" min="0" data-role="none" data-f="cyclic" value="' + f('cyclic') + '">' +
+      '<span title="Loxone-Wert auch nach jeder (Re-)Verbindung senden">Bei Connect</span>' +
+      '<input type="checkbox" data-role="none" data-f="send_on_connect"' + (isTrue(row.send_on_connect) ? ' checked' : '') + '>' +
+    '</div></td>' +
     '<td><span class="ga-del" onclick="delGaRow(' + idx + ')">&times;</span></td>' +
     '</tr>';
 }
@@ -662,7 +755,11 @@ function delGaRow(idx) { GA_ROWS.splice(idx, 1); renderGaTable(); }
 function collectGaRowsFromDom() {
   document.querySelectorAll('#ga-tbody tr').forEach(tr => {
     const idx = parseInt(tr.dataset.idx, 10);
-    tr.querySelectorAll('[data-f]').forEach(el => { GA_ROWS[idx][el.dataset.f] = el.value; });
+    tr.querySelectorAll('[data-f]').forEach(el => {
+      GA_ROWS[idx][el.dataset.f] = el.type === 'checkbox' ? (el.checked ? 'true' : '') : el.value;
+    });
+    // Leere optionale Felder nicht in groupaddresses.yaml schreiben
+    GA_OPTIONAL_FIELDS.forEach(k => { if (GA_ROWS[idx][k] === '' || GA_ROWS[idx][k] == null) delete GA_ROWS[idx][k]; });
   });
   return GA_ROWS.filter(r => r.addr);
 }
@@ -864,6 +961,27 @@ function toggleLog(name) {
   btn.textContent = show ? 'Log verbergen ▴' : 'Log anzeigen ▾';
 }
 
+function applyHealth(h, bridgeRunning) {
+  const dots = document.querySelectorAll('#dot-health, #dot-health0');
+  const t0 = document.getElementById('txt-health0');
+  const t1 = document.getElementById('txt-health');
+  const det = document.getElementById('health-detail');
+  const rs = document.getElementById('health-reasons');
+  let cls, txt;
+  if (!h || !bridgeRunning) { cls = 'err'; txt = bridgeRunning ? 'noch keine Daten (erste Pruefung nach dem Intervall)' : 'Bridge laeuft nicht'; }
+  else if (h.ok) { cls = 'ok'; txt = 'ok'; }
+  else { cls = 'err'; txt = 'gestoert'; }
+  dots.forEach(el => el.className = 'status-dot ' + cls);
+  if (t0) t0.textContent = 'Gesamtzustand: ' + txt;
+  if (t1) t1.textContent = txt + (h && h.ts ? ' (Stand ' + h.ts + ')' : '');
+  if (det) det.textContent = h ? (
+    'Letztes KNX-Telegramm: ' + (h.last_knx_rx || 'noch keines') +
+    ' | KNX-Timeout: ' + (h.knx_timeout ? h.knx_timeout + ' s' : 'aus') +
+    ' | Zaehler: ' + (h.heartbeat_uuid ? h.heartbeat_counter : 'kein virtueller Eingang konfiguriert')
+  ) : '';
+  if (rs) rs.textContent = h && !h.ok && h.reasons ? h.reasons.join(' · ') : '';
+}
+
 function renderActivity(events) {
   const tbody = document.getElementById('activity-tbody');
   if (!tbody) return;
@@ -902,7 +1020,7 @@ async function pollStatus() {
   const e = await api('engine_status');
   if (!e.error) applyServiceStatus('engine', e);
   const b = await api('bridge_status');
-  if (!b.error) applyServiceStatus('bridge', b);
+  if (!b.error) { applyServiceStatus('bridge', b); applyHealth(b.health, !!b.running); }
   const l = await api('api_log');
   const el = document.getElementById('log-api');
   if (el && l.log !== undefined) el.textContent = l.log;
